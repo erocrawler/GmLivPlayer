@@ -149,8 +149,10 @@ export abstract class PlayerBase<Info extends { expressions: { id: string }[] }>
   /** @internal */
   protected actions = new ActionPlayer()
   private drivers: Driver[] = []
-  private expr: Record<string, number> = {}
-  private smile = 0
+  /** @internal */
+  protected expr: Record<string, number> = {}
+  /** @internal */
+  protected smile = 0
   private raf = 0
   private last = 0
   private visible = true

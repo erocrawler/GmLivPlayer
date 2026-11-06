@@ -1,0 +1,12 @@
+; supervisor program (adjust paths / node binary). Key goes in $RENDER_ROOT/.key (chmod 600), never in this file.
+[program:arona-render]
+command=/usr/bin/node /workspace/plana-render/service/server.mjs
+directory=/workspace/plana-render/service
+environment=PORT="27662",INTERNAL_PORT="18190",RENDER_ROOT="/workspace/plana-render",PLAYWRIGHT_BROWSERS_PATH="/workspace/plana-render/browsers"
+autostart=true
+autorestart=true
+startsecs=3
+stdout_logfile=/var/log/arona-render.log
+stderr_logfile=/var/log/arona-render.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=2

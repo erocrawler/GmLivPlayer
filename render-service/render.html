@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh"><meta charset="utf-8"><title>arona-render page</title>
+<style>html,body{margin:0;overflow:hidden}body{background:#20222b center/cover no-repeat}canvas{display:block}</style>
+<canvas id="stage"></canvas>
+<script type="importmap">{"imports":{"three":"/node_modules/three/build/three.module.js","three/examples/jsm/":"/node_modules/three/examples/jsm/","@pixiv/three-vrm":"/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"}}</script>
+<script type="module">
+import { BodyPlayer } from '/dist-multi/body.js'
+import { VrmBody } from '/dist-multi/vrm.js'
+// Frame-stepped renderer page used by arona-render: the animation clock moves by exactly dt per step() call.
+const q=new URLSearchParams(location.search), W=+q.get('w'), H=+q.get('h');
+const canvas=document.getElementById('stage'); canvas.width=W; canvas.height=H; canvas.style.width=W+'px'; canvas.style.height=H+'px';
+if(q.get('bg')) document.body.style.backgroundImage=`url(${q.get('bg')})`; else if(q.get('bgc')) document.body.style.background=q.get('bgc');
+const body=new VrmBody(); window.body=body;
+const player=new BodyPlayer(canvas,body,{autoplay:false,idle:q.get('idle')!=='0'});
+window.player=player; window.ready=false; window.err=null;
+try{
+  await player.load(q.get('vrm'));
+  try{player.setExpression(null)}catch(e){}
+  player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1);
+  const amb=q.get('amb'), dir=q.get('dir');
+  body.scene.traverse(o=>{ if(o.isAmbientLight&&amb) o.intensity=+amb; if(o.isDirectionalLight&&dir) o.intensity=+dir });
+  window.step=(mouth,dt)=>{ player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); return 1 };
+  window.setExprs=m=>player.setExpressions(m);
+  window.act=n=>{ try{player.act(n)}catch(e){} };
+  window.exprIds=()=>player.expressions.map(e=>e.id);
+  window.renderer=()=>{ const g=document.createElement('canvas').getContext('webgl2'); const x=g&&g.getExtension('WEBGL_debug_renderer_info'); return x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):'unknown' };
+  window.ready=true;
+}catch(e){ window.err=String(e.message||e) }
+</script></html>

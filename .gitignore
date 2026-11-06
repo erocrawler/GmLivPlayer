@@ -5,3 +5,26 @@ dist/
 example/model/
 # made by the build (scripts/pack-characters.mjs)
 characters/*.livliv
+# models / media / local test artifacts (licensed, never commit)
+*.vrm
+*.vrm.br
+*.glb
+*.wav
+*.mp4
+*.jpg
+*.png
+dist-multi/
+plana-*
+arona-*
+miku-*
+perform-all.mjs
+rec*.mjs
+step*.html
+office*
+package-lock.json
+.render_key
+.key
+__pycache__/
+*.pyc
+__pycache__/
+*.pyc

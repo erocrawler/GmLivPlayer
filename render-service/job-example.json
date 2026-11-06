@@ -1,0 +1,15 @@
+{
+  "vrm": "arona_toon3c.vrm",
+  "audio": "arona-perform.wav",
+  "bg": "office-small.jpg",
+  "width": 720, "height": 1280, "fps": 24,
+  "amb": 0, "gain": 0.65,
+  "view": {"zoom": 0.9, "y": -0.1},
+  "timeline": [
+    {"t": 0.0, "e": {"happy": 1, "smileEyes": 1}},
+    {"t": 3.2, "e": {"surprised": 1, "starEyes": 1}},
+    {"t": 6.2, "e": {"angry": 1}},
+    {"t": 9.2, "e": {"happy": 1, "smileEyes": 1, "shy": 0.8}}
+  ],
+  "actions": [{"t": 0.8, "name": "nod"}]
+}

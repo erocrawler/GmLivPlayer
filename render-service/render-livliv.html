@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh"><meta charset="utf-8"><title>arona-render livliv page</title>
+<style>html,body{margin:0;overflow:hidden}body{background:#20222b center/cover no-repeat}canvas{display:block}</style>
+<canvas id="stage"></canvas>
+<script type="module">
+import { Player } from '/dist-multi/index.js'
+// Frame-stepped LivLiv (2.5D) character page used by arona-render.
+const q=new URLSearchParams(location.search), W=+q.get('w'), H=+q.get('h');
+const canvas=document.getElementById('stage'); canvas.width=W; canvas.height=H; canvas.style.width=W+'px'; canvas.style.height=H+'px';
+if(q.get('bg')) document.body.style.backgroundImage=`url(${q.get('bg')})`; else if(q.get('bgc')) document.body.style.background=q.get('bgc');
+window.ready=false; window.err=null;
+try{
+  const player=new Player(canvas,{autoplay:false,idle:q.get('idle')!=='0',followPointer:false});
+  window.player=player;
+  await player.load(q.get('model'));
+  player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1);
+  // LivLiv rigs squash the eye layers unevenly at partial blink (left lash flares out). Snap the blink to open/closed so no mid-blink frame is drawn.
+  window.eyeLog=[];
+  if(q.get('snap')!=='0') player.use({order:100,update(f){ const s=v=>v>0.5?1:0; f.params.eyeLOpen=s(f.params.eyeLOpen); f.params.eyeROpen=s(f.params.eyeROpen) }});
+  player.use({order:200,update(f){ window.eyeLog.push([+f.params.eyeLOpen.toFixed(2),+f.params.eyeROpen.toFixed(2)]) }});
+  window.step=(mouth,dt)=>{ player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.draw(dt); return 1 };
+  // LivLiv's Player takes one expression at a time: use the strongest one in the map
+  window.setExprs=m=>{ const e=Object.entries(m||{}).filter(([,w])=>w>0.01).sort((a,b)=>b[1]-a[1])[0]; return player.setExpression(e?e[0]:null,e?e[1]:1) };
+  window.act=n=>{ try{player.act(n)}catch(e){} };
+  window.exprIds=()=>player.expressions.map(e=>e.id);
+  window.renderer=()=>{ const g=document.createElement('canvas').getContext('webgl2'); const x=g&&g.getExtension('WEBGL_debug_renderer_info'); return x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):'unknown' };
+  window.ready=true;
+}catch(e){ window.err=String(e.message||e) }
+</script></html>

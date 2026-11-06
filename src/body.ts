@@ -121,6 +121,20 @@ export class BodyPlayer extends PlayerBase<BodyInfo> {
     }))
   }
 
+  /** several expressions at once, each with its own weight ({ happy: 1, x_smileEyes: 1 }): they add up in the model, each
+   *  shape key capped at 1. smile is the smile param; an unknown id fails the whole call and changes nothing. {} = neutral */
+  setExpressions(weights: Record<string, number>): boolean {
+    for (const id of Object.keys(weights)) if (!this.expressions.some((e) => e.id === id)) return false
+    const expr: Record<string, number> = {}
+    let smile = 0
+    for (const [id, w] of Object.entries(weights)) {
+      if (id === 'smile') smile = Math.min(1, Math.max(0, w))
+      else expr[id] = Math.min(1, Math.max(0, w))
+    }
+    this.smile = smile; this.expr = expr
+    return true
+  }
+
   /** @internal */
   protected show(dt: number) {
     const f = this.frame, V = this.view
