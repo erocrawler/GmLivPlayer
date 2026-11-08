@@ -20,6 +20,70 @@ const live2dDir=name=>`${PLAYER}/Resources/${name}`;
 const live2dModelFile=name=>`${live2dDir(name)}/${name}.model3.json`;
 const live2dConfig=name=>{ try{ return JSON.parse(fs.readFileSync(`${live2dDir(name)}/${name}.config.json`,'utf8')) }catch{ return null } };
 const live2dModels=()=>{ try{ return fs.readdirSync(`${PLAYER}/Resources`).filter(d=>{ try{ return fs.statSync(live2dModelFile(d)).isFile() }catch{ return false } }) }catch{ return [] } };
+// Capability discovery: what a Live2D model supports (motions + loop flags,
+// expressions, outfits), read from its <Model>.config.json at request time.
+// An agent reads /info to learn the aliases instead of guessing them;
+// nothing about a model's capabilities is hardcoded here.
+const live2dCaps=name=>{ const cfg=live2dConfig(name); if(!cfg) return null;
+  return { motions:Object.entries(cfg.motions||{}).map(([alias,v])=>({alias,loop:!!v.loop})),
+           expressions:Object.keys(cfg.expressions||{}),
+           outfits:Array.isArray(cfg.outfits)?cfg.outfits.slice():[] };
+};
+// Actions every VRM/LivLiv character supports (validate() enforces exactly
+// this list). Shared with /info so an agent learns them from the API.
+const ACTIONS=['nod','shake','tilt','hop','shy'];
+// VRM expressions, read from the file itself (no three-vrm on the server):
+// parse the GLB JSON chunk only, then replicate what the player reports
+// (src/vrm.ts) from three-vrm's expression names. VRM 1.0: preset keys are
+// already the expression names; custom keys are used as-is. VRM 0.x:
+// blendShapeGroups map through three-vrm's v0v1PresetNameMap (lowercase
+// presetName -> v1 name); anything unmapped keeps the group's own name
+// (e.g. VRoid's "Surprised"). The player's list is the FEELINGS present
+// (happy first) plus customs (a custom whose lowercase matches a feeling
+// takes that id); blink/visemes/look directions never appear in it.
+const VRM_PRESET_NAMES=new Set(['aa','ih','ou','ee','oh','blink','blinkLeft','blinkRight','happy','angry','sad','relaxed','surprised','neutral','lookUp','lookDown','lookLeft','lookRight']);
+const VRM0_PRESET_MAP={a:'aa',e:'ee',i:'ih',o:'oh',u:'ou',blink:'blink',joy:'happy',angry:'angry',sorrow:'sad',fun:'relaxed',lookup:'lookUp',lookdown:'lookDown',lookleft:'lookLeft',lookright:'lookRight',blink_l:'blinkLeft',blink_r:'blinkRight',neutral:'neutral'};
+const FEELINGS=['happy','angry','sad','relaxed','surprised'];
+function vrmGlbJson(file){ // the GLB's JSON chunk, or null (not a GLB / unreadable)
+  let fd; try{ fd=fs.openSync(file,'r'); const h=Buffer.alloc(20); if(fs.readSync(fd,h,0,20,0)<20) return null;
+    if(h.readUInt32LE(0)!==0x46546c67) return null; // 'glTF'
+    const chunkLen=h.readUInt32LE(12), chunkType=h.readUInt32LE(16);
+    if(chunkType!==0x4e4f534a||chunkLen>32*2**20) return null; // 'JSON', player VRM_LIMITS.json
+    const jb=Buffer.alloc(chunkLen); if(fs.readSync(fd,jb,0,chunkLen,20)<chunkLen) return null;
+    return JSON.parse(jb.toString('utf8'));
+  }catch{ return null } finally{ if(fd!==undefined) try{fs.closeSync(fd)}catch{} }
+}
+function vrmCaps(file){
+  const j=vrmGlbJson(file); if(!j) return null;
+  const ext=j.extensions||{}; let spec=null, names=[], customs=[];
+  if(ext.VRMC_vrm){ spec='1'; const ex=ext.VRMC_vrm.expressions||{};
+    for(const n of Object.keys(ex.preset||{})) if(VRM_PRESET_NAMES.has(n)) names.push(n);
+    for(const n of Object.keys(ex.custom||{})) if(!VRM_PRESET_NAMES.has(n)){ names.push(n); customs.push(n); }
+  } else if(ext.VRM){ spec='0'; const seen=new Set();
+    for(const g of ext.VRM.blendShapeMaster?.blendShapeGroups||[]){ const n=VRM0_PRESET_MAP[g.presetName]||g.name; if(n==null||seen.has(n)) continue; seen.add(n); names.push(n); if(!VRM_PRESET_NAMES.has(n)) customs.push(n); }
+  } else return null;
+  const has=new Set(names), exprs=[];
+  if(has.has('happy')) exprs.push('happy');
+  for(const f of FEELINGS) if(f!=='happy'&&has.has(f)) exprs.push(f);
+  for(const n of customs){ const id=FEELINGS.includes(n.toLowerCase())?n.toLowerCase():n; if(!exprs.includes(id)) exprs.push(id); }
+  const meta=spec==='1'?(ext.VRMC_vrm.meta||{}):(ext.VRM.meta||{});
+  const name=String(meta.name||meta.title||'').trim()||null;
+  // BodyPlayer always prepends a synthetic 'smile' (src/body.ts: a param,
+  // not a file expression), so the player reports it first on every VRM.
+  return {spec, name, expressions:['smile',...exprs.filter(e=>e!=='smile')], actions:ACTIONS};
+}
+const vrmModels=()=>{ try{ return fs.readdirSync(`${ASSETS}/vrm`).filter(f=>/\.vrm$|\.glb$/i.test(f)&&fs.statSync(`${ASSETS}/vrm/${f}`).isFile()) }catch{ return [] } };
+// LivLiv: expressions come from the character's own model.json (the file the
+// player loads from /characters/<id>/), so /info reports exactly what the
+// player shows. p03 (Pen) is excluded: validate() refuses it (no rights).
+const livlivCharacters=()=>{ try{ return fs.readdirSync(`${PLAYER}/characters`).filter(d=>{ if(NO_CHARACTERS.has(d)) return false; try{ return fs.statSync(`${PLAYER}/characters/${d}/model.json`).isFile() }catch{ return false } }) }catch{ return [] } };
+const livlivCaps=id=>{ try{ const m=JSON.parse(fs.readFileSync(`${PLAYER}/characters/${id}/model.json`,'utf8'));
+  // The player (src/index.ts) uses the file's expressions, or — for packages
+  // with none — a synthetic 'smile' when a layer is expr_smile, else none.
+  const exprs=Array.isArray(m.expressions)?m.expressions.map(e=>e.id).filter(x=>typeof x==='string')
+    :(Array.isArray(m.layers)&&m.layers.some(l=>l.id==='expr_smile')?['smile']:[]);
+  return {name:typeof m.name==='string'?m.name:null, expressions:exprs, actions:ACTIONS};
+}catch{ return null } };
 const FONT=(()=>{ try{ return execFileSync('fc-match',['-f','%{file}','WenQuanYi Zen Hei Mono'],{encoding:'utf8'}).trim() }catch{ return '' } })();
 const MIN_VRAM_MIB=1200, MIN_DISK_MB=1500, MAX_PIXELS=2.2e6, MAX_FRAMES=1800, KEEP_JOBS=10;
 for(const d of ['vrm','audio','bg']) fs.mkdirSync(`${ASSETS}/${d}`,{recursive:true}); fs.mkdirSync(JOBS,{recursive:true});
@@ -76,7 +140,7 @@ function validate(b){
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
     view:{x:num(b.view?.x,0,-2,2,'view.x'),y:num(b.view?.y,0,-2,2,'view.y'),zoom:num(b.view?.zoom,1,0.2,5,'view.zoom')},
     timeline:Array.isArray(b.timeline)?b.timeline.slice(0,500).map(k=>({t:num(k.t,0,-10,120,'timeline.t'),e:Object.fromEntries(Object.entries(k.e||{}).slice(0,20).map(([id,w])=>{ if(!/^[A-Za-z0-9_]{1,40}$/.test(id)) throw new Error('bad expression id'); return [id,num(w,1,0,1,'weight')] }))})).sort((a,c)=>a.t-c.t):[],
-    actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!['nod','shake','tilt','hop','shy'].includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[] };
+    actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!ACTIONS.includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[] };
   if(j.width*j.height>MAX_PIXELS) throw new Error(`too many pixels (max ${MAX_PIXELS})`);
   if((!!j.vrm)+(!!j.character)+(!!j.live2d)!==1) throw new Error('give exactly one of vrm, character or live2d');
   if(j.vrm&&(!safeName(j.vrm)||!fs.existsSync(`${ASSETS}/vrm/${j.vrm}`))) throw new Error('unknown vrm asset');
@@ -175,7 +239,8 @@ http.createServer(async(req,res)=>{
     const u=new URL(req.url,'http://x'), parts=u.pathname.split('/').filter(Boolean);
     if(req.method==='GET'&&u.pathname==='/health') return json(res,200,{ok:true});
     if(!okKey(req.headers['x-render-key'])) return json(res,401,{error:'unauthorized'});
-    if(req.method==='GET'&&u.pathname==='/info') return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),live2d:live2dModels()});
+    if(req.method==='GET'&&u.pathname==='/info'){ const l2=live2dModels(); const vr=vrmModels(), lv=livlivCharacters();
+      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
     if(req.method==='PUT'&&parts[0]==='assets'&&parts.length===3){
       const [,kind,name]=parts; if(!EXT[kind]||!safeName(name)||!EXT[kind].includes(path.extname(name).toLowerCase())) return json(res,400,{error:'bad kind/name/extension'});
       if(freeDiskMB()<MIN_DISK_MB) return json(res,507,{error:'disk low'});
