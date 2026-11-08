@@ -9,6 +9,17 @@ const NO_CHARACTERS=new Set(['p03']); // Pen: LivLiv holds no rights, never rend
 const CC_BY_NC_SA=new Set(['p01','p02']); // Kujira / Kujira Q: CC BY-NC-SA 4.0, attribution required
 const creditFor=id=>CC_BY_NC_SA.has(id)?'Kujira: 上善无形、ZipZipPipe (CC BY-NC-SA 4.0); model: LivLiv':'角色: LivLiv (livliv.ai)';
 const VRM_CREDIT={'BlueFatFish.vrm':'模型: 蓝色小肥鱼Deepseek by 木子恶魔 (非商用; 禁止再分发/修改)'};
+// Live2D (M4): models are PRE-PLACED under PLAYER/Resources/<name>/ (never
+// uploaded via the API — the service must not become a model distribution
+// point). Credit is fixed server-side per model and cannot be overridden or
+// disabled by the request (plan §1 acceptance 4). M0 final wording still
+// pending; this is the plan's draft credit.
+const LIVE2D_CREDIT={DSGongpi:'模型: 大肥鱼 DeepSeek-chan by 神宫凉子 / 霓虹猫_NeonNeko（免费公皮，禁止再分发）'};
+const creditForLive2d=id=>LIVE2D_CREDIT[id]||`模型: ${id} (Live2D)`;
+const live2dDir=name=>`${PLAYER}/Resources/${name}`;
+const live2dModelFile=name=>`${live2dDir(name)}/${name}.model3.json`;
+const live2dConfig=name=>{ try{ return JSON.parse(fs.readFileSync(`${live2dDir(name)}/${name}.config.json`,'utf8')) }catch{ return null } };
+const live2dModels=()=>{ try{ return fs.readdirSync(`${PLAYER}/Resources`).filter(d=>{ try{ return fs.statSync(live2dModelFile(d)).isFile() }catch{ return false } }) }catch{ return [] } };
 const FONT=(()=>{ try{ return execFileSync('fc-match',['-f','%{file}','WenQuanYi Zen Hei Mono'],{encoding:'utf8'}).trim() }catch{ return '' } })();
 const MIN_VRAM_MIB=1200, MIN_DISK_MB=1500, MAX_PIXELS=2.2e6, MAX_FRAMES=1800, KEEP_JOBS=10;
 for(const d of ['vrm','audio','bg']) fs.mkdirSync(`${ASSETS}/${d}`,{recursive:true}); fs.mkdirSync(JOBS,{recursive:true});
@@ -59,20 +70,34 @@ function envelope({x,rate}){ // the player's own mouth envelope (src/runtime/spe
 const jobs=new Map(), queue=[]; let running=false;
 function validate(b){
   const num=(v,d,lo,hi,name)=>{ const x=v===undefined?d:+v; if(!Number.isFinite(x)||x<lo||x>hi) throw new Error(`${name} must be in [${lo}, ${hi}]`); return x };
-  const j={ vrm:b.vrm?String(b.vrm):null, character:b.character?String(b.character):null, credit:b.credit===undefined?undefined:b.credit, audio:b.audio?String(b.audio):null, bg:b.bg?String(b.bg):null, bgColor:b.bgColor?String(b.bgColor):null,
+  const j={ vrm:b.vrm?String(b.vrm):null, character:b.character?String(b.character):null, live2d:b.live2d?String(b.live2d):null, motion:b.motion?String(b.motion):null, credit:b.credit===undefined?undefined:b.credit, audio:b.audio?String(b.audio):null, bg:b.bg?String(b.bg):null, bgColor:b.bgColor?String(b.bgColor):null,
     width:Math.round(num(b.width,720,64,2048,'width')), height:Math.round(num(b.height,1280,64,2048,'height')), fps:num(b.fps,24,1,30,'fps'),
     amb:num(b.amb,0,0,3,'amb'), dir:b.dir===undefined?null:num(b.dir,Math.PI,0,10,'dir'), gain:num(b.gain,0.65,0,1,'gain'),
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
     view:{x:num(b.view?.x,0,-2,2,'view.x'),y:num(b.view?.y,0,-2,2,'view.y'),zoom:num(b.view?.zoom,1,0.2,5,'view.zoom')},
     timeline:Array.isArray(b.timeline)?b.timeline.slice(0,500).map(k=>({t:num(k.t,0,-10,120,'timeline.t'),e:Object.fromEntries(Object.entries(k.e||{}).slice(0,20).map(([id,w])=>{ if(!/^[A-Za-z0-9_]{1,40}$/.test(id)) throw new Error('bad expression id'); return [id,num(w,1,0,1,'weight')] }))})).sort((a,c)=>a.t-c.t):[],
-    actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(!['nod','shake','tilt','hop','shy'].includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[] };
+    actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!['nod','shake','tilt','hop','shy'].includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[] };
   if(j.width*j.height>MAX_PIXELS) throw new Error(`too many pixels (max ${MAX_PIXELS})`);
-  if(!!j.vrm===!!j.character) throw new Error('give exactly one of vrm or character');
+  if((!!j.vrm)+(!!j.character)+(!!j.live2d)!==1) throw new Error('give exactly one of vrm, character or live2d');
   if(j.vrm&&(!safeName(j.vrm)||!fs.existsSync(`${ASSETS}/vrm/${j.vrm}`))) throw new Error('unknown vrm asset');
   if(j.character){
     if(!/^[A-Za-z0-9_]{1,20}$/.test(j.character)||!fs.existsSync(`${PLAYER}/characters/${j.character}/model.json`)) throw new Error('unknown character');
     if(NO_CHARACTERS.has(j.character)) throw new Error(`character ${j.character} is not available (no rights granted)`);
     if(j.credit===undefined) j.credit=creditFor(j.character);
+  }
+  if(j.live2d){
+    if(!/^[A-Za-z0-9_-]{1,40}$/.test(j.live2d)||!fs.existsSync(live2dModelFile(j.live2d))) throw new Error('unknown live2d model');
+    const cfg=live2dConfig(j.live2d), motions=cfg?.motions?Object.keys(cfg.motions):[], exprs=cfg?.expressions?Object.keys(cfg.expressions):[];
+    if(j.motion&&!motions.includes(j.motion)) throw new Error(`unknown live2d motion "${j.motion}" (have: ${motions.join(', ')})`);
+    for(const k of j.timeline) for(const id of Object.keys(k.e)) if(exprs.length&&!exprs.includes(id)) throw new Error(`unknown live2d expression "${id}" (have: ${exprs.join(', ')})`);
+    for(const a of j.actions) if(!motions.includes(a.name)) throw new Error(`unknown live2d motion "${a.name}" (have: ${motions.join(', ')})`);
+    // Live2D is always portrait 9:16 (the render page frames the model that
+    // way); derive height from width. Re-check pixels after the override.
+    j.height=Math.round(j.width*1280/720);
+    if(j.width*j.height>MAX_PIXELS) throw new Error(`too many pixels (max ${MAX_PIXELS})`);
+    // Credit is fixed server-side for Live2D: the client cannot override or
+    // disable it. bg/view/amb/dir/idle are VRM/LivLiv-only and ignored here.
+    j.credit=creditForLive2d(j.live2d);
   }
   if(j.vrm&&j.credit===undefined&&VRM_CREDIT[j.vrm]) j.credit=VRM_CREDIT[j.vrm];
   if(j.credit!==undefined&&j.credit!==false&&j.credit!==null&&(typeof j.credit!=='string'||j.credit.length>160||/[\u0000-\u001f]/.test(j.credit))) throw new Error('credit must be a string (<=160 chars, no control chars), or false');
@@ -91,23 +116,33 @@ async function runJob(job){
   if(p.audio){ wavPath=`${ASSETS}/audio/${p.audio}`; const w=readWav(wavPath); mouthAt=envelope(w); dur=w.dur }
   const total=p.pre+dur+p.post, frames=Math.ceil(total*p.fps); if(frames>MAX_FRAMES) throw new Error(`too many frames (${frames} > ${MAX_FRAMES})`);
   job.frames=frames; job.videoSec=+total.toFixed(2);
+  const isL2d=!!p.live2d;
   const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,idle:p.idle?'1':'0'});
-  if(p.vrm) q.set('vrm',`/assets/vrm/${p.vrm}`); else q.set('model',`/characters/${p.character}/`);
+  if(p.vrm) q.set('vrm',`/assets/vrm/${p.vrm}`); else if(!isL2d) q.set('model',`/characters/${p.character}/`);
   if(p.dir!==null) q.set('dir',String(p.dir)); if(p.bg) q.set('bg',`/assets/bg/${p.bg}`); else if(p.bgColor) q.set('bgc',p.bgColor);
   const browser=await chromium.launch({args:['--use-gl=angle','--use-angle=gl-egl','--enable-gpu','--ignore-gpu-blocklist','--no-sandbox','--disable-gpu-sandbox']});
   try{
     const page=await browser.newPage({viewport:{width:p.width,height:p.height}}); const cdp=await page.context().newCDPSession(page);
-    await page.goto(`http://127.0.0.1:${INTERNAL}/${p.character?'render-livliv.html':'render.html'}?${q}`,{waitUntil:'domcontentloaded'});
+    await page.goto(isL2d?`http://127.0.0.1:${INTERNAL}/render-live2d.html?model=${encodeURIComponent(p.live2d)}&res=${p.width}&core=purism`:`http://127.0.0.1:${INTERNAL}/${p.character?'render-livliv.html':'render.html'}?${q}`,{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.ready||window.err,null,{timeout:180000});
     const err=await page.evaluate(()=>window.err); if(err) throw new Error('page: '+err);
     job.renderer=await page.evaluate(()=>window.renderer()); const ids=await page.evaluate(()=>window.exprIds());
     for(const k of p.timeline) for(const id of Object.keys(k.e)) if(!ids.includes(id)) throw new Error(`unknown expression "${id}" (have: ${ids.join(', ')})`);
+    if(isL2d){
+      // Actions are one-shot motions on the Live2D page (window.act is the
+      // VRM/LivLiv API); validate them against the page's motion list, and
+      // start the requested base loop (the page starts its base loop at load;
+      // starting it again at frame 0 is a no-op in effect).
+      const mids=await page.evaluate(()=>window.motionIds());
+      for(const a of p.actions) if(!mids.includes(a.name)) throw new Error(`unknown live2d motion "${a.name}" (have: ${mids.join(', ')})`);
+      if(p.motion){ const ok=await page.evaluate(n=>window.startMotion(n,1),p.motion); if(!ok) throw new Error(`cannot start live2d motion "${p.motion}"`) }
+    }
     const t0=Date.now(); let ki=-1, ai=0;
     for(let i=0;i<frames;i++){
       const t=i/p.fps-p.pre;
       let nk=-1; for(let k=0;k<p.timeline.length;k++) if(p.timeline[k].t<=t) nk=k;
       if(nk!==ki){ ki=nk; await page.evaluate(m=>window.setExprs(m),nk<0?{}:p.timeline[nk].e) }
-      while(ai<p.actions.length&&p.actions[ai].t<=t){ const n=p.actions[ai++].name; await page.evaluate(n=>window.act(n),n) }
+      while(ai<p.actions.length&&p.actions[ai].t<=t){ const n=p.actions[ai++].name; if(isL2d) await page.evaluate(n=>window.startMotion(n,2),n); else await page.evaluate(n=>window.act(n),n) }
       await page.evaluate(([mo,dt])=>window.step(mo,dt),[mouthAt(t)*p.gain,1/p.fps]);
       const r=await cdp.send('Page.captureScreenshot',{format:'jpeg',quality:90});
       fs.writeFileSync(`${fr}/${String(i).padStart(5,'0')}.jpg`,Buffer.from(r.data,'base64')); job.progress=+((i+1)/frames).toFixed(3);
@@ -134,13 +169,13 @@ async function pump(){
   running=false;
 }
 // ---- public API ----
-const pub=j=>({id:j.id,state:j.state,character:j.params?.character,credit:j.params?.credit||undefined,progress:j.progress??0,frames:j.frames,videoSec:j.videoSec,renderSec:j.renderSec,renderer:j.renderer,bytes:j.bytes,error:j.error});
+const pub=j=>({id:j.id,state:j.state,character:j.params?.character,live2d:j.params?.live2d,credit:j.params?.credit||undefined,progress:j.progress??0,frames:j.frames,videoSec:j.videoSec,renderSec:j.renderSec,renderer:j.renderer,bytes:j.bytes,error:j.error});
 http.createServer(async(req,res)=>{
   try{
     const u=new URL(req.url,'http://x'), parts=u.pathname.split('/').filter(Boolean);
     if(req.method==='GET'&&u.pathname==='/health') return json(res,200,{ok:true});
     if(!okKey(req.headers['x-render-key'])) return json(res,401,{error:'unauthorized'});
-    if(req.method==='GET'&&u.pathname==='/info') return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)]))});
+    if(req.method==='GET'&&u.pathname==='/info') return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),live2d:live2dModels()});
     if(req.method==='PUT'&&parts[0]==='assets'&&parts.length===3){
       const [,kind,name]=parts; if(!EXT[kind]||!safeName(name)||!EXT[kind].includes(path.extname(name).toLowerCase())) return json(res,400,{error:'bad kind/name/extension'});
       if(freeDiskMB()<MIN_DISK_MB) return json(res,507,{error:'disk low'});

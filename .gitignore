@@ -13,6 +13,16 @@ characters/*.livliv
 *.mp4
 *.jpg
 *.png
+# Live2D model files (licensed, never commit) — plan §6; models are pre-placed
+# on the render host at player/Resources/<name>/, never in this repo
+*.moc3
+*.model3.json
+*.exp3.json
+*.motion3.json
+*.physics3.json
+*.cdi3.json
+*.vtube.json
+render-service/live2d/Resources/
 dist-multi/
 plana-*
 arona-*

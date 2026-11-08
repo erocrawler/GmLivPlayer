@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>M2 Live2D render</title>
+  <style>html,body{margin:0;overflow:hidden;background:#20222b}canvas{display:block}</style>
+  <script>
+    (function () {
+      var core = new URLSearchParams(location.search).get('core') || 'purism';
+      var src = core === 'official' ? './Core/live2dcubismcore.min.js' : './Core/purismcore.js';
+      document.write('<script src="' + src + '"><\/script>');
+    })();
+  </script>
+  <script>
+    if (window.PurismCore) { window.Live2DCubismCore = window.PurismCore; window.__coreKind = 'purism'; }
+    else { window.__coreKind = 'official'; }
+  </script>
+  <script type="module" crossorigin src="./live2d-assets/render-live2d-mLkFVdhR.js"></script>
+</head>
+<body>
+<canvas id="stage" width="720" height="1280"></canvas>
+</body>
+</html>

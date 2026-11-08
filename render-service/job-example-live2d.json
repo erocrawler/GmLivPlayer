@@ -1,0 +1,1 @@
+{"actions":[{"name":"raise_hand","t":1.0}],"audio":"voiceline.wav","fps":24,"gain":0.65,"height":1280,"live2d":"DSGongpi","motion":"idle","post":1.3,"pre":0.6,"timeline":[{"e":{"heart":1},"t":0.0},{"e":{"blush":1},"t":2.0}],"width":720}
