@@ -65,6 +65,9 @@ export class VrmBody implements Body {
   private bones: Partial<Record<'head' | 'neck' | 'spine' | 'chest', T.Object3D>> = {}
   /** the framing: the world height shown (m), and its center */
   private frame = { height: 1, y: 1 }
+  /** the visible half-height at the character's plane (world units): what place() fits the camera to, and what the
+   *  view's x/y shares are shares of */
+  private visHalfH = 1
   private has = new Set<string>()
   private canvas: HTMLCanvasElement | null = null
   private headAt = { x: 0.5, y: 0.25 }
@@ -190,6 +193,7 @@ export class VrmBody implements Body {
     const c = this.camera, half = this.frame.height / 2
     // tall enough for the height, wide enough for the shoulders and arms on narrow canvases
     const dist = Math.max(half, this.width / 2 / aspect) / Math.tan((c.fov * D) / 2)
+    this.visHalfH = Math.max(half, this.width / 2 / aspect)
     c.aspect = aspect
     c.position.set(0, this.frame.y, dist)
     c.lookAt(0, this.frame.y, 0)
@@ -215,7 +219,13 @@ export class VrmBody implements Body {
     b.head?.rotation.set(-s * P.angleY * D * hk, P.angleX * D * hk, -s * P.angleZ * D * hk)
     b.spine?.rotation.set(0, P.bodyX * D * 0.8, -s * P.bodyZ * D * 0.8)
     b.chest?.rotation.set(-s * (P.breath - 0.5) * 0.02, 0, 0)
-    vrm.scene.position.set(move.x * this.frame.height * 0.5, move.y * this.frame.height, 0)
+    // the view, in shares of the visible frame (what View promises, and what
+    // the LivLiv Puppet already does: 1 is the full frame, so 0.1 is a 10%
+    // nudge). x/y move by that share of the visible width/height, and zoom
+    // scales about the character's center (frame.y) — so zooming out keeps
+    // the character in frame instead of dropping it out the bottom.
+    const visH = 2 * this.visHalfH, visW = visH * (w / h)
+    vrm.scene.position.set(move.x * visW, this.frame.y * (1 - move.s) + move.y * visH, 0)
     vrm.scene.scale.setScalar(move.s)
     const em = vrm.expressionManager
     if (em) {

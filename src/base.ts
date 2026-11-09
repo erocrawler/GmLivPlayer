@@ -31,8 +31,10 @@ export interface PlayerOptions {
   lang?: string
 }
 
-/** where the character sits in the canvas: x, y move it by shares of the canvas (y up), zoom scales it about the
- *  center; head: frame the head instead of the whole drawing (avatars, chat bubbles; a BodyPlayer does not use it) */
+/** where the character sits in the canvas: x, y move it by shares of the visible frame (y up), where 1 is the
+ *  full frame — so 0.1 is a 10% nudge and 1 puts its center at the edge; zoom scales it about the character's
+ *  center (1 is the default framing, smaller shows more of the body); head: frame the head instead of the whole
+ *  drawing (avatars, chat bubbles; a BodyPlayer does not use it) */
 export interface View { x: number; y: number; zoom: number; head: boolean }
 
 /** one frame being put together, as a driver sees it */

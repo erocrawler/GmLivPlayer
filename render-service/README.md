@@ -30,6 +30,9 @@ mouth envelope is the player's own `envelope()` ported to node, so lipsync match
 `POST /jobs` with `vrm` XOR `character`, `audio`, `bg`/`bgColor`, `width,height,fps`, `amb,dir,gain,pre,post,duration,idle`,
 `view {x,y,zoom}`, `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `animations [{t,file}]` (VRM only, see below),
 `credit`; `GET /jobs/:id`, `/jobs/:id/video.mp4`, `/info`.
+`view`: x/y are shares of the visible frame (y up), where 1 is the full frame — so 0.1 is a 10% nudge and 1 puts the
+character's center at the edge; zoom scales about the character's center (1 is the default head-to-hips framing,
+smaller shows more of the body, e.g. 0.4 for a full body). The same units apply to VRM and LivLiv.
 `/info` also lists model capabilities under `live2dModels`, `vrmModels` and `livlivModels` (see below), so a client can discover
 motion/expression/outfit aliases instead of guessing them. Guards: min free VRAM / disk / shm, MAX_PIXELS, MAX_FRAMES.
 
