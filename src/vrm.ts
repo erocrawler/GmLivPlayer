@@ -70,6 +70,13 @@ export class VrmBody implements Body {
   private headAt = { x: 0.5, y: 0.25 }
   private width = 0.6
 
+  /** the loaded VRM, once load() has resolved (a page playing an external animation — a .vrma clip — needs it to build its clips) */
+  getVRM(): VRM | null { return this.vrm }
+
+  /** called after the pose is written to the bones and before the model updates: a page playing an external animation
+   *  applies it here, so it overrides the pose's bones for the tracks it has (the idle keeps the rest, and the face) */
+  onBeforeRender?: () => void
+
   constructor(options: VrmBodyOptions = {}) { this.options = options }
 
   attach(canvas: HTMLCanvasElement) {
@@ -226,6 +233,7 @@ export class VrmBody implements Body {
     }
     // three-vrm's pitch is positive looking down
     if (vrm.lookAt) { vrm.lookAt.yaw = P.eyeBallX * 25; vrm.lookAt.pitch = -P.eyeBallY * 15 }
+    this.onBeforeRender?.()
     vrm.update(dt)
     this.renderer.render(this.scene, this.camera)
     // where the head is now, for the pointer

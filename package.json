@@ -102,5 +102,8 @@
     "test:engines": "node test/smoke.mjs firefox && node test/smoke.mjs webkit",
     "prepublishOnly": "npm run check && npm test",
     "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm-animation": "3.5.5"
   }
 }

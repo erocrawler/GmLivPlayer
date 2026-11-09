@@ -28,7 +28,8 @@ mouth envelope is the player's own `envelope()` ported to node, so lipsync match
 ## API (short)
 
 `POST /jobs` with `vrm` XOR `character`, `audio`, `bg`/`bgColor`, `width,height,fps`, `amb,dir,gain,pre,post,duration,idle`,
-`view {x,y,zoom}`, `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `credit`; `GET /jobs/:id`, `/jobs/:id/video.mp4`, `/info`.
+`view {x,y,zoom}`, `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `animations [{t,file}]` (VRM only, see below),
+`credit`; `GET /jobs/:id`, `/jobs/:id/video.mp4`, `/info`.
 `/info` also lists model capabilities under `live2dModels`, `vrmModels` and `livlivModels` (see below), so a client can discover
 motion/expression/outfit aliases instead of guessing them. Guards: min free VRAM / disk / shm, MAX_PIXELS, MAX_FRAMES.
 
@@ -78,6 +79,35 @@ the same fixed list `validate()` enforces; shared as the `ACTIONS` constant in `
   `src/index.ts`).
 - The page is the hybrid renderer (PurismCore + Framework state, custom WebGL draw); blink repeats every 2.5s so
   long jobs keep blinking; one-shot motions hold their end pose and the base loop resumes underneath.
+
+## VRM animations (.vrma) on a timeline
+
+A VRM job can play `.vrma` animation clips on a timeline, so an agent can script what the character does when —
+e.g. a greeting at 0s while speaking, idle in between, another gesture at 10s. See `job-example-vrm-animation.json`.
+
+- Upload: `PUT /assets/anim/<name>.vrma` (same upload endpoint as the other kinds). The file is validated on
+  upload and rejected (400) unless it is a genuine VRM animation (a `VRMC_vrm_animation` extension with a keyframed
+  animation). `.vrma` applies directly to any VRM — no retargeting, because VRM humanoid bones are standardized
+  (BVH cannot be used this way; it needs bone retargeting and is not supported).
+- Discovery: `/info` lists every uploaded clip under `animations`, keyed by filename, with its `duration` in seconds
+  (`{"hello.vrma": {"duration": 15.767}}`), and under `assets.anim`. The duration is read from the file's own
+  keyframe times in the binary chunk — not from the JSON `min`/`max`, which some exporters omit (a file whose JSON
+  says 0s can really be 15.8s). Read `/info` to learn the lengths instead of guessing them.
+- Job param: `animations: [{file, t}]` (VRM only; rejected for Live2D/LivLiv jobs). `t` is seconds from audio start,
+  the same base as `timeline` and `actions`. Each clip plays once for its own length. The latest clip whose `t` has
+  passed and which has not finished overrides the one playing — a new clip cuts in immediately, no blending, no
+  queue. When no clip is playing, the idle resumes. If a clip's `t` is past the job's end it simply never plays.
+- Stacking: expressions (`timeline`) and lip-sync (audio) stack with clips — they drive the face, clips drive the
+  body, and `.vrma` files carry no expression tracks. The fixed one-shot `actions` (nod/shake/tilt/hop/shy) are
+  skipped while a clip owns the bones. The idle keeps running underneath a clip for the bones the clip does not
+  animate (breath, blink, eye look), so the face stays alive during a gesture.
+- Determinism: clips are frame-stepped (`mixer.setTime` per frame, never a running clock), so the same job renders
+  identically — verified by rendering twice and comparing frames (see the M4 determinism check for Live2D).
+- Player hook: the page (`render.html`) loads clips with `@pixiv/three-vrm-animation` (`VRMAnimationLoaderPlugin`
+  + `createVRMAnimationClip`) and applies the active one in `VrmBody.onBeforeRender` (a hook in `src/vrm.ts`,
+  called after the pose is written to the bones and before the model updates), so a clip overrides the pose's bones
+  for the tracks it has. `VrmBody.getVRM()` exposes the loaded VRM for building the clips. Both are additive;
+  VRM/LivLiv jobs without `animations` render exactly as before.
 
 ## Importing a Live2D model
 

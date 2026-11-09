@@ -2,8 +2,9 @@
 <html lang="zh"><meta charset="utf-8"><title>arona-render page</title>
 <style>html,body{margin:0;overflow:hidden}body{background:#20222b center/cover no-repeat}canvas{display:block}</style>
 <canvas id="stage"></canvas>
-<script type="importmap">{"imports":{"three":"/node_modules/three/build/three.module.js","three/examples/jsm/":"/node_modules/three/examples/jsm/","@pixiv/three-vrm":"/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"}}</script>
+<script type="importmap">{"imports":{"three":"/node_modules/three/build/three.module.js","three/examples/jsm/":"/node_modules/three/examples/jsm/","@pixiv/three-vrm":"/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js","@pixiv/three-vrm-animation":"/node_modules/@pixiv/three-vrm-animation/lib/three-vrm-animation.module.js"}}</script>
 <script type="module">
+import * as THREE from 'three'
 import { BodyPlayer } from '/dist-multi/body.js'
 import { VrmBody } from '/dist-multi/vrm.js'
 // Frame-stepped renderer page used by arona-render: the animation clock moves by exactly dt per step() call.
@@ -13,15 +14,54 @@ if(q.get('bg')) document.body.style.backgroundImage=`url(${q.get('bg')})`; else 
 const body=new VrmBody(); window.body=body;
 const player=new BodyPlayer(canvas,body,{autoplay:false,idle:q.get('idle')!=='0'});
 window.player=player; window.ready=false; window.err=null;
+// .vrma clips on a timeline (job `animations`): [{file, t}] — t seconds from
+// audio start, the same base as the expression timeline and the one-shot
+// actions. The latest clip whose t has passed and which has not finished
+// playing overrides the one before it; when none is playing the idle resumes.
+// Expressions and lip-sync stack with clips (face vs body). The fixed
+// one-shot actions (window.act) are skipped while a clip owns the bones.
+let anims=[];
+try{ anims=JSON.parse(q.get('anims')||'[]') }catch(e){ anims=[] }
+const pre=+(q.get('pre')||0);
+let clock=0, curT=-pre; // t of the frame about to render (clock counts from job start; pre counts down to audio start)
+let mixer=null, clips=[], curClip=-1;
+function activeClipAt(t){ let idx=-1; for(let i=0;i<clips.length;i++){ const c=clips[i]; if(c.t<=t&&t<c.t+c.duration) idx=i } return idx }
 try{
   await player.load(q.get('vrm'));
   try{player.setExpression(null)}catch(e){}
   player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1);
   const amb=q.get('amb'), dir=q.get('dir');
   body.scene.traverse(o=>{ if(o.isAmbientLight&&amb) o.intensity=+amb; if(o.isDirectionalLight&&dir) o.intensity=+dir });
-  window.step=(mouth,dt)=>{ player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); return 1 };
+  if(anims.length){
+    const vrm=body.getVRM();
+    if(!vrm) throw new Error('no VRM loaded for animations');
+    const { GLTFLoader }=await import('three/examples/jsm/loaders/GLTFLoader.js');
+    const { VRMAnimationLoaderPlugin, createVRMAnimationClip }=await import('@pixiv/three-vrm-animation');
+    const loader=new GLTFLoader();
+    loader.register(parser=>new VRMAnimationLoaderPlugin(parser));
+    mixer=new THREE.AnimationMixer(vrm.scene);
+    for(const a of anims){
+      const gltf=await loader.loadAsync(`/assets/anim/${a.file}`);
+      const va=gltf.userData.vrmAnimations?.[0];
+      if(!va) throw new Error(`no VRM animation in ${a.file}`);
+      const clip=createVRMAnimationClip(va,vrm);
+      const action=mixer.clipAction(clip);
+      action.setLoop(THREE.LoopOnce); action.clampWhenFinished=true; action.stop();
+      clips.push({file:a.file,t:a.t,duration:clip.duration,clip,action});
+    }
+    // runs inside VrmBody.render(), after the pose is written to the bones
+    // and before the model updates: the clip overrides the pose's bones for
+    // the tracks it has, the idle keeps the rest (breath, blink, eyes).
+    body.onBeforeRender=()=>{
+      const idx=activeClipAt(curT);
+      if(idx<0){ if(curClip>=0){ clips[curClip].action.stop(); curClip=-1 } return }
+      if(idx!==curClip){ if(curClip>=0) clips[curClip].action.stop(); curClip=idx; clips[curClip].action.play() }
+      mixer.setTime(curT-clips[curClip].t);
+    };
+  }
+  window.step=(mouth,dt)=>{ curT=clock-pre; player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); clock+=dt; return 1 };
   window.setExprs=m=>player.setExpressions(m);
-  window.act=n=>{ try{player.act(n)}catch(e){} };
+  window.act=n=>{ if(activeClipAt(curT)>=0) return; try{player.act(n)}catch(e){} };
   window.exprIds=()=>player.expressions.map(e=>e.id);
   window.renderer=()=>{ const g=document.createElement('canvas').getContext('webgl2'); const x=g&&g.getExtension('WEBGL_debug_renderer_info'); return x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):'unknown' };
   window.ready=true;

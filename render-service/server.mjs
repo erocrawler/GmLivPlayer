@@ -73,6 +73,33 @@ function vrmCaps(file){
   return {spec, name, expressions:['smile',...exprs.filter(e=>e!=='smile')], actions:ACTIONS};
 }
 const vrmModels=()=>{ try{ return fs.readdirSync(`${ASSETS}/vrm`).filter(f=>/\.vrm$|\.glb$/i.test(f)&&fs.statSync(`${ASSETS}/vrm/${f}`).isFile()) }catch{ return [] } };
+// A .vrma's length in seconds, from the animation's own keyframe times (the
+// binary data, not the JSON min/max — some exporters omit those, so a max
+// read would say 0 for a real 15s clip). null when the file is not a VRM
+// animation (no VRMC_vrm_animation extension, no animation, or no usable
+// keyframe times). An agent reads /info to learn each file's length instead
+// of guessing it, then schedules clips on the job's animation timeline.
+function vrmaDuration(file){
+  let buf; try{ buf=fs.readFileSync(file) }catch{ return null }
+  if(buf.length<28||buf.readUInt32LE(0)!==0x46546c67) return null; // 'glTF'
+  const jsonLen=buf.readUInt32LE(12);
+  if(buf.readUInt32LE(16)!==0x4e4f534a||20+jsonLen+8>buf.length) return null; // 'JSON'
+  let j; try{ j=JSON.parse(buf.slice(20,20+jsonLen).toString('utf8')) }catch{ return null }
+  if(!j.extensions?.VRMC_vrm_animation&&!(j.extensionsUsed||[]).includes('VRMC_vrm_animation')) return null;
+  const anim=j.animations?.[0]; if(!anim||!Array.isArray(anim.samplers)||!anim.samplers.length) return null;
+  const binStart=20+jsonLen+8, binLen=buf.readUInt32LE(20+jsonLen);
+  if(buf.readUInt32LE(20+jsonLen+4)!==0x004e4942||binStart+binLen>buf.length) return null; // 'BIN'
+  let dur=0;
+  for(const s of anim.samplers){
+    const acc=j.accessors?.[s.input]; if(!acc||acc.componentType!==5126||acc.type!=='SCALAR'||!acc.count) continue;
+    const bv=j.bufferViews?.[acc.bufferView]; if(!bv||(bv.byteStride&&bv.byteStride!==4)) continue;
+    const off=binStart+(bv.byteOffset||0)+(acc.byteOffset||0);
+    if(off+acc.count*4>binStart+binLen) continue;
+    for(let i=0;i<acc.count;i++){ const t=buf.readFloatLE(off+i*4); if(Number.isFinite(t)) dur=Math.max(dur,t) }
+  }
+  return dur>0?dur:null;
+}
+const animFiles=()=>{ try{ return fs.readdirSync(`${ASSETS}/anim`).filter(f=>/\.vrma$/i.test(f)&&fs.statSync(`${ASSETS}/anim/${f}`).isFile()) }catch{ return [] } };
 // LivLiv: expressions come from the character's own model.json (the file the
 // player loads from /characters/<id>/), so /info reports exactly what the
 // player shows. p03 (Pen) is excluded: validate() refuses it (no rights).
@@ -86,11 +113,11 @@ const livlivCaps=id=>{ try{ const m=JSON.parse(fs.readFileSync(`${PLAYER}/charac
 }catch{ return null } };
 const FONT=(()=>{ try{ return execFileSync('fc-match',['-f','%{file}','WenQuanYi Zen Hei Mono'],{encoding:'utf8'}).trim() }catch{ return '' } })();
 const MIN_VRAM_MIB=1200, MIN_DISK_MB=1500, MAX_PIXELS=2.2e6, MAX_FRAMES=1800, KEEP_JOBS=10;
-for(const d of ['vrm','audio','bg']) fs.mkdirSync(`${ASSETS}/${d}`,{recursive:true}); fs.mkdirSync(JOBS,{recursive:true});
+for(const d of ['vrm','audio','bg','anim']) fs.mkdirSync(`${ASSETS}/${d}`,{recursive:true}); fs.mkdirSync(JOBS,{recursive:true});
 fs.rmSync(SHM,{recursive:true,force:true}); fs.mkdirSync(SHM,{recursive:true});
 const log=(...a)=>console.log(new Date().toISOString(),...a);
 const MIME={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.json':'application/json','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.wav':'audio/wav','.vrm':'application/octet-stream','.glb':'application/octet-stream','.mp4':'video/mp4','.css':'text/css','.map':'application/json'};
-const EXT={vrm:['.vrm','.glb'],audio:['.wav'],bg:['.png','.jpg','.jpeg','.webp']};
+const EXT={vrm:['.vrm','.glb'],audio:['.wav'],bg:['.png','.jpg','.jpeg','.webp'],anim:['.vrma']};
 // ---- internal static server (only for our own Chromium, bound to 127.0.0.1) ----
 http.createServer((req,res)=>{
   try{
@@ -140,7 +167,13 @@ function validate(b){
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
     view:{x:num(b.view?.x,0,-2,2,'view.x'),y:num(b.view?.y,0,-2,2,'view.y'),zoom:num(b.view?.zoom,1,0.2,5,'view.zoom')},
     timeline:Array.isArray(b.timeline)?b.timeline.slice(0,500).map(k=>({t:num(k.t,0,-10,120,'timeline.t'),e:Object.fromEntries(Object.entries(k.e||{}).slice(0,20).map(([id,w])=>{ if(!/^[A-Za-z0-9_]{1,40}$/.test(id)) throw new Error('bad expression id'); return [id,num(w,1,0,1,'weight')] }))})).sort((a,c)=>a.t-c.t):[],
-    actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!ACTIONS.includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[] };
+    actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!ACTIONS.includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[],
+    // .vrma clips on a timeline (VRM only): each starts at t (seconds from
+    // audio start, same base as timeline/actions) and plays once for its own
+    // length; a later clip overrides the one playing, and when none is
+    // playing the idle resumes. Expressions (timeline) and lip-sync stack
+    // with clips — they drive the face, clips drive the body.
+    animations:Array.isArray(b.animations)?b.animations.slice(0,200).map(a=>{ if(typeof a.file!=='string'||!safeName(a.file)||!/\.vrma$/i.test(a.file)) throw new Error('bad animation file'); return {file:a.file,t:num(a.t,0,-10,120,'animations.t')} }).sort((a,c)=>a.t-c.t):[] };
   if(j.width*j.height>MAX_PIXELS) throw new Error(`too many pixels (max ${MAX_PIXELS})`);
   if((!!j.vrm)+(!!j.character)+(!!j.live2d)!==1) throw new Error('give exactly one of vrm, character or live2d');
   if(j.vrm&&(!safeName(j.vrm)||!fs.existsSync(`${ASSETS}/vrm/${j.vrm}`))) throw new Error('unknown vrm asset');
@@ -167,6 +200,8 @@ function validate(b){
   if(j.credit!==undefined&&j.credit!==false&&j.credit!==null&&(typeof j.credit!=='string'||j.credit.length>160||/[\u0000-\u001f]/.test(j.credit))) throw new Error('credit must be a string (<=160 chars, no control chars), or false');
   if(j.audio&&(!safeName(j.audio)||!fs.existsSync(`${ASSETS}/audio/${j.audio}`))) throw new Error('unknown audio asset');
   if(j.bg&&(!safeName(j.bg)||!fs.existsSync(`${ASSETS}/bg/${j.bg}`))) throw new Error('unknown bg asset');
+  if(j.animations.length&&!j.vrm) throw new Error('animations need a vrm job');
+  for(const a of j.animations) if(!fs.existsSync(`${ASSETS}/anim/${a.file}`)) throw new Error(`unknown animation asset "${a.file}"`);
   if(j.bgColor&&!/^#[0-9a-fA-F]{6}$/.test(j.bgColor)) throw new Error('bgColor must be #rrggbb');
   if(!j.audio&&!j.duration) throw new Error('give audio or duration');
   return j;
@@ -184,6 +219,7 @@ async function runJob(job){
   const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,idle:p.idle?'1':'0'});
   if(p.vrm) q.set('vrm',`/assets/vrm/${p.vrm}`); else if(!isL2d) q.set('model',`/characters/${p.character}/`);
   if(p.dir!==null) q.set('dir',String(p.dir)); if(p.bg) q.set('bg',`/assets/bg/${p.bg}`); else if(p.bgColor) q.set('bgc',p.bgColor);
+  if(p.animations.length){ q.set('anims',JSON.stringify(p.animations)); q.set('pre',String(p.pre)) }
   const browser=await chromium.launch({args:['--use-gl=angle','--use-angle=gl-egl','--enable-gpu','--ignore-gpu-blocklist','--no-sandbox','--disable-gpu-sandbox']});
   try{
     const page=await browser.newPage({viewport:{width:p.width,height:p.height}}); const cdp=await page.context().newCDPSession(page);
@@ -240,13 +276,15 @@ http.createServer(async(req,res)=>{
     if(req.method==='GET'&&u.pathname==='/health') return json(res,200,{ok:true});
     if(!okKey(req.headers['x-render-key'])) return json(res,401,{error:'unauthorized'});
     if(req.method==='GET'&&u.pathname==='/info'){ const l2=live2dModels(); const vr=vrmModels(), lv=livlivCharacters();
-      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
+      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg','anim'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
     if(req.method==='PUT'&&parts[0]==='assets'&&parts.length===3){
       const [,kind,name]=parts; if(!EXT[kind]||!safeName(name)||!EXT[kind].includes(path.extname(name).toLowerCase())) return json(res,400,{error:'bad kind/name/extension'});
       if(freeDiskMB()<MIN_DISK_MB) return json(res,507,{error:'disk low'});
       const tmp=`${ASSETS}/${kind}/.${name}.${process.pid}.tmp`, out=fs.createWriteStream(tmp); let n=0, bad=false; const MAX=kind==='vrm'?200e6:60e6;
       req.on('data',c=>{ n+=c.length; if(n>MAX&&!bad){ bad=true; req.destroy(); out.destroy(); fs.rmSync(tmp,{force:true}); } }); req.pipe(out);
-      out.on('finish',()=>{ if(bad) return; fs.renameSync(tmp,`${ASSETS}/${kind}/${name}`); json(res,200,{ok:true,bytes:n}) }); return;
+      out.on('finish',()=>{ if(bad) return; const dest=`${ASSETS}/${kind}/${name}`; fs.renameSync(tmp,dest);
+        if(kind==='anim'&&vrmaDuration(dest)===null){ fs.rmSync(dest,{force:true}); return json(res,400,{error:'not a valid .vrma (needs VRMC_vrm_animation + a keyframed animation)'}) }
+        json(res,200,{ok:true,bytes:n}) }); return;
     }
     if(req.method==='POST'&&u.pathname==='/jobs'){
       let body=''; for await(const c of req){ body+=c; if(body.length>1e6) return json(res,413,{error:'body too large'}) }
