@@ -22,6 +22,13 @@ window.player=player; window.ready=false; window.err=null;
 // one-shot actions (window.act) are skipped while a clip owns the bones.
 let anims=[];
 try{ anims=JSON.parse(q.get('anims')||'[]') }catch(e){ anims=[] }
+// Camera cuts over time (job `viewTimeline`): [{t,x,y,zoom,pitch}] — the
+// latest entry whose t has passed wins (immediate cut); before the first
+// entry the base view (vx/vy/zoom/pitch) applies. Same time base as the
+// expression timeline (t = seconds from audio start).
+let viewtl=[];
+try{ viewtl=JSON.parse(q.get('viewtl')||'[]') }catch(e){ viewtl=[] }
+function viewAt(t){ let v=null; for(const e of viewtl){ if(e.t<=t) v=e; else break } return v }
 const pre=+(q.get('pre')||0);
 let clock=0, curT=-pre; // t of the frame about to render (clock counts from job start; pre counts down to audio start)
 let mixer=null, clips=[], curClip=-1;
@@ -29,7 +36,7 @@ function activeClipAt(t){ let idx=-1; for(let i=0;i<clips.length;i++){ const c=c
 try{
   await player.load(q.get('vrm'));
   try{player.setExpression(null)}catch(e){}
-  player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1);
+  player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1); player.view.pitch=+(q.get('pitch')||0);
   const amb=q.get('amb'), dir=q.get('dir');
   body.scene.traverse(o=>{ if(o.isAmbientLight&&amb) o.intensity=+amb; if(o.isDirectionalLight&&dir) o.intensity=+dir });
   if(anims.length){
@@ -59,7 +66,7 @@ try{
       mixer.setTime(curT-clips[curClip].t);
     };
   }
-  window.step=(mouth,dt)=>{ curT=clock-pre; player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); clock+=dt; return 1 };
+  window.step=(mouth,dt)=>{ curT=clock-pre; const v=viewAt(curT); if(v){ player.view.x=v.x; player.view.y=v.y; player.view.zoom=v.zoom; player.view.pitch=v.pitch } player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); clock+=dt; return 1 };
   window.setExprs=m=>player.setExpressions(m);
   window.act=n=>{ if(activeClipAt(curT)>=0) return; try{player.act(n)}catch(e){} };
   window.exprIds=()=>player.expressions.map(e=>e.id);

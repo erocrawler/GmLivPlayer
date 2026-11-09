@@ -33,9 +33,10 @@ export interface PlayerOptions {
 
 /** where the character sits in the canvas: x, y move it by shares of the visible frame (y up), where 1 is the
  *  full frame — so 0.1 is a 10% nudge and 1 puts its center at the edge; zoom scales it about the character's
- *  center (1 is the default framing, smaller shows more of the body); head: frame the head instead of the whole
- *  drawing (avatars, chat bubbles; a BodyPlayer does not use it) */
-export interface View { x: number; y: number; zoom: number; head: boolean }
+ *  center (1 is the default framing, smaller shows more of the body); pitch tilts the camera in degrees, positive
+ *  looking up from below (a low angle) and negative looking down from above; head: frame the head instead of the
+ *  whole drawing (avatars, chat bubbles; a BodyPlayer does not use it) */
+export interface View { x: number; y: number; zoom: number; head: boolean; pitch: number }
 
 /** one frame being put together, as a driver sees it */
 export interface Frame {
@@ -132,7 +133,7 @@ export abstract class PlayerBase<Info extends { expressions: { id: string }[] }>
   idle: boolean
   /** see PlayerOptions.followPointer */
   followPointer: 'page' | 'canvas' | false
-  readonly view: View = { x: 0, y: 0, zoom: 1, head: false }
+  readonly view: View = { x: 0, y: 0, zoom: 1, head: false, pitch: 0 }
   /** see PlayerOptions.lang */
   readonly lang: string
   /** Called when the canvas's WebGL context is lost (a phone reclaiming the page's GPU memory, a driver reset, too many

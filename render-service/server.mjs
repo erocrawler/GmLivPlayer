@@ -32,6 +32,37 @@ const live2dCaps=name=>{ const cfg=live2dConfig(name); if(!cfg) return null;
 // Actions every VRM/LivLiv character supports (validate() enforces exactly
 // this list). Shared with /info so an agent learns them from the API.
 const ACTIONS=['nod','shake','tilt','hop','shy'];
+// Named camera presets ("views"): a job may pass view as one of these
+// aliases instead of raw {x,y,zoom,pitch} numbers, so an agent does not have
+// to guess the framing. An object still wins when both are given shape:
+// view can be a string alias, or an object {x,y,zoom,pitch} (partial objects
+// fall back to the defaults, not to an alias). Shared with /info.
+// The base names (full/half/...) are tuned for portrait 9:16 (the service
+// default); each also has an explicit -portrait twin (same values) and a
+// -landscape twin whose zoom is scaled by 0.75 — in landscape the camera
+// fits to the height, so the same zoom frames tighter and the full body
+// needs a smaller zoom to keep the feet in frame (verified: full is 0.4 in
+// portrait, 0.3 in landscape).
+const VIEWS={
+  full:{x:0,y:0,zoom:0.4,pitch:0},      // whole body, head to toe
+  half:{x:0,y:0,zoom:0.7,pitch:0},      // waist up
+  bust:{x:0,y:0,zoom:1,pitch:0},        // chest up (the default framing)
+  face:{x:0,y:-0.35,zoom:2,pitch:0},    // face close-up
+  neck:{x:0,y:0,zoom:1.5,pitch:25},     // low angle, neck + face from below
+  low:{x:0,y:0,zoom:1,pitch:25},        // low angle, full upper body
+  'full-portrait':{x:0,y:0,zoom:0.4,pitch:0},
+  'half-portrait':{x:0,y:0,zoom:0.7,pitch:0},
+  'bust-portrait':{x:0,y:0,zoom:1,pitch:0},
+  'face-portrait':{x:0,y:-0.35,zoom:2,pitch:0},
+  'neck-portrait':{x:0,y:0,zoom:1.5,pitch:25},
+  'low-portrait':{x:0,y:0,zoom:1,pitch:25},
+  'full-landscape':{x:0,y:0,zoom:0.3,pitch:0},
+  'half-landscape':{x:0,y:0,zoom:0.5,pitch:0},
+  'bust-landscape':{x:0,y:0,zoom:0.75,pitch:0},
+  'face-landscape':{x:0,y:-0.35,zoom:1.5,pitch:0},
+  'neck-landscape':{x:0,y:0,zoom:1.1,pitch:25},
+  'low-landscape':{x:0,y:0,zoom:0.75,pitch:25},
+};
 // VRM expressions, read from the file itself (no three-vrm on the server):
 // parse the GLB JSON chunk only, then replicate what the player reports
 // (src/vrm.ts) from three-vrm's expression names. VRM 1.0: preset keys are
@@ -165,7 +196,12 @@ function validate(b){
     width:Math.round(num(b.width,720,64,2048,'width')), height:Math.round(num(b.height,1280,64,2048,'height')), fps:num(b.fps,24,1,30,'fps'),
     amb:num(b.amb,0,0,3,'amb'), dir:b.dir===undefined?null:num(b.dir,Math.PI,0,10,'dir'), gain:num(b.gain,0.65,0,1,'gain'),
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
-    view:{x:num(b.view?.x,0,-2,2,'view.x'),y:num(b.view?.y,0,-2,2,'view.y'),zoom:num(b.view?.zoom,1,0.2,5,'view.zoom')},
+    view:(()=>{ const v=typeof b.view==='string'?VIEWS[b.view]:b.view; if(typeof b.view==='string'&&!v) throw new Error(`unknown view "${b.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {x:num(o.x,0,-2,2,'view.x'),y:num(o.y,0,-2,2,'view.y'),zoom:num(o.zoom,1,0.2,5,'view.zoom'),pitch:num(o.pitch,0,-60,60,'view.pitch')} })(),
+    // Camera cuts over time: [{t, view}] — view is a preset alias or a
+    // {x,y,zoom,pitch} object, same as `view`. The latest entry whose t has
+    // passed wins (an immediate cut, no interpolation); before the first
+    // entry the base `view` applies. Same time base as timeline/actions.
+    viewTimeline:Array.isArray(b.viewTimeline)?b.viewTimeline.slice(0,200).map(k=>{ const v=typeof k.view==='string'?VIEWS[k.view]:k.view; if(typeof k.view==='string'&&!v) throw new Error(`unknown view "${k.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {t:num(k.t,0,-10,120,'viewTimeline.t'),x:num(o.x,0,-2,2,'viewTimeline.x'),y:num(o.y,0,-2,2,'viewTimeline.y'),zoom:num(o.zoom,1,0.2,5,'viewTimeline.zoom'),pitch:num(o.pitch,0,-60,60,'viewTimeline.pitch')} }).sort((a,c)=>a.t-c.t):[],
     timeline:Array.isArray(b.timeline)?b.timeline.slice(0,500).map(k=>({t:num(k.t,0,-10,120,'timeline.t'),e:Object.fromEntries(Object.entries(k.e||{}).slice(0,20).map(([id,w])=>{ if(!/^[A-Za-z0-9_]{1,40}$/.test(id)) throw new Error('bad expression id'); return [id,num(w,1,0,1,'weight')] }))})).sort((a,c)=>a.t-c.t):[],
     actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!ACTIONS.includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[],
     // .vrma clips on a timeline (VRM only): each starts at t (seconds from
@@ -216,10 +252,11 @@ async function runJob(job){
   const total=p.pre+dur+p.post, frames=Math.ceil(total*p.fps); if(frames>MAX_FRAMES) throw new Error(`too many frames (${frames} > ${MAX_FRAMES})`);
   job.frames=frames; job.videoSec=+total.toFixed(2);
   const isL2d=!!p.live2d;
-  const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,idle:p.idle?'1':'0'});
+  const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,pitch:p.view.pitch,idle:p.idle?'1':'0'});
   if(p.vrm) q.set('vrm',`/assets/vrm/${p.vrm}`); else if(!isL2d) q.set('model',`/characters/${p.character}/`);
   if(p.dir!==null) q.set('dir',String(p.dir)); if(p.bg) q.set('bg',`/assets/bg/${p.bg}`); else if(p.bgColor) q.set('bgc',p.bgColor);
   if(p.animations.length){ q.set('anims',JSON.stringify(p.animations)); q.set('pre',String(p.pre)) }
+  if(p.viewTimeline.length) q.set('viewtl',JSON.stringify(p.viewTimeline));
   const browser=await chromium.launch({args:['--use-gl=angle','--use-angle=gl-egl','--enable-gpu','--ignore-gpu-blocklist','--no-sandbox','--disable-gpu-sandbox']});
   try{
     const page=await browser.newPage({viewport:{width:p.width,height:p.height}}); const cdp=await page.context().newCDPSession(page);
@@ -276,7 +313,7 @@ http.createServer(async(req,res)=>{
     if(req.method==='GET'&&u.pathname==='/health') return json(res,200,{ok:true});
     if(!okKey(req.headers['x-render-key'])) return json(res,401,{error:'unauthorized'});
     if(req.method==='GET'&&u.pathname==='/info'){ const l2=live2dModels(); const vr=vrmModels(), lv=livlivCharacters();
-      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,assets:Object.fromEntries(['vrm','audio','bg','anim'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
+      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,views:VIEWS,assets:Object.fromEntries(['vrm','audio','bg','anim'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
     if(req.method==='PUT'&&parts[0]==='assets'&&parts.length===3){
       const [,kind,name]=parts; if(!EXT[kind]||!safeName(name)||!EXT[kind].includes(path.extname(name).toLowerCase())) return json(res,400,{error:'bad kind/name/extension'});
       if(freeDiskMB()<MIN_DISK_MB) return json(res,507,{error:'disk low'});

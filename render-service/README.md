@@ -32,7 +32,18 @@ mouth envelope is the player's own `envelope()` ported to node, so lipsync match
 `credit`; `GET /jobs/:id`, `/jobs/:id/video.mp4`, `/info`.
 `view`: x/y are shares of the visible frame (y up), where 1 is the full frame — so 0.1 is a 10% nudge and 1 puts the
 character's center at the edge; zoom scales about the character's center (1 is the default head-to-hips framing,
-smaller shows more of the body, e.g. 0.4 for a full body). The same units apply to VRM and LivLiv.
+smaller shows more of the body, e.g. 0.4 for a full body); pitch tilts the camera in degrees, positive looking up
+from below (a low angle, e.g. 25 to look up at the neck) and negative looking down from above. The same units apply
+to VRM and LivLiv. Instead of guessing numbers, pass `view` as one of the named presets (also listed in `/info`
+under `views`): `full` (whole body), `half` (waist up), `bust` (chest up, the default framing), `face` (face
+close-up), `neck` (low angle, neck + face from below), `low` (low angle, full upper body). A `view` object
+`{x,y,zoom,pitch}` still works for a custom framing. The base names are tuned for portrait 9:16 (the service
+default); each also has an explicit `-portrait` twin (same values) and a `-landscape` twin whose zoom is scaled
+down — in landscape the camera fits to the height, so the same zoom frames tighter (e.g. `full` is 0.4 in
+portrait but 0.3 in landscape, or the feet get cut). Use the twin that matches the job's orientation. To switch cameras mid-shot, pass `viewTimeline [{t, view}]`
+— `t` is seconds from audio start (same base as the expression timeline), `view` is a preset alias or a
+`{x,y,zoom,pitch}` object; the latest entry whose `t` has passed wins (an immediate cut, no interpolation), and
+before the first entry the base `view` applies.
 `/info` also lists model capabilities under `live2dModels`, `vrmModels` and `livlivModels` (see below), so a client can discover
 motion/expression/outfit aliases instead of guessing them. Guards: min free VRAM / disk / shm, MAX_PIXELS, MAX_FRAMES.
 

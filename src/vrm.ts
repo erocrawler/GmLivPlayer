@@ -68,6 +68,8 @@ export class VrmBody implements Body {
   /** the visible half-height at the character's plane (world units): what place() fits the camera to, and what the
    *  view's x/y shares are shares of */
   private visHalfH = 1
+  /** the camera pitch place() last used (degrees), so render() re-places when it changes */
+  private pitch = 0
   private has = new Set<string>()
   private canvas: HTMLCanvasElement | null = null
   private headAt = { x: 0.5, y: 0.25 }
@@ -188,19 +190,22 @@ export class VrmBody implements Body {
     return { name, expressions, meta: vrmTerms(vrm.meta as unknown as Record<string, unknown>) }
   }
 
-  /** the camera where the framing fits the canvas's aspect */
-  private place(aspect: number) {
+  /** the camera where the framing fits the canvas's aspect; pitchDeg tilts it in degrees, positive dropping the
+   *  camera below the character's center and looking up at it (a low angle), negative raising it and looking down */
+  private place(aspect: number, pitchDeg = 0) {
     const c = this.camera, half = this.frame.height / 2
     // tall enough for the height, wide enough for the shoulders and arms on narrow canvases
     const dist = Math.max(half, this.width / 2 / aspect) / Math.tan((c.fov * D) / 2)
     this.visHalfH = Math.max(half, this.width / 2 / aspect)
+    this.pitch = pitchDeg
     c.aspect = aspect
-    c.position.set(0, this.frame.y, dist)
+    const p = pitchDeg * D
+    c.position.set(0, this.frame.y - dist * Math.sin(p), dist * Math.cos(p))
     c.lookAt(0, this.frame.y, 0)
     c.updateProjectionMatrix()
   }
 
-  render(canvas: HTMLCanvasElement, { params: P, move, expr }: Pose, w: number, h: number, dt: number) {
+  render(canvas: HTMLCanvasElement, { params: P, move, expr, pitch }: Pose, w: number, h: number, dt: number) {
     const THREE = this.THREE, vrm = this.vrm
     if (!vrm) return
     if (!this.renderer || this.canvas !== canvas) {
@@ -210,7 +215,7 @@ export class VrmBody implements Body {
       this.canvas = canvas
     }
     if (canvas.width !== w || canvas.height !== h) this.renderer.setSize(w, h, false)
-    if (this.camera.aspect !== w / h) this.place(w / h)  // a new character's camera, on a canvas already this size too
+    if (this.camera.aspect !== w / h || this.pitch !== pitch) this.place(w / h, pitch)  // a new character's camera, on a canvas already this size too
     const b = this.bones, s = this.flip
     // the head turns most, the neck some (yaw: to the screen's right; pitch: up; roll: its top to the screen's right, as a
     // Player's does). The neck is optional in VRM: without one the head takes it all
