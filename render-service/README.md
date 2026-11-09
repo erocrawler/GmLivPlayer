@@ -28,21 +28,24 @@ mouth envelope is the player's own `envelope()` ported to node, so lipsync match
 ## API (short)
 
 `POST /jobs` with `vrm` XOR `character`, `audio`, `bg`/`bgColor`, `width,height,fps`, `amb,dir,gain,pre,post,duration,idle`,
-`view {x,y,zoom}`, `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `animations [{t,file}]` (VRM only, see below),
+`view {x,y,zoom,pitch,yaw,gaze}`, `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `animations [{t,file}]` (VRM only, see below),
 `credit`; `GET /jobs/:id`, `/jobs/:id/video.mp4`, `/info`.
 `view`: x/y are shares of the visible frame (y up), where 1 is the full frame — so 0.1 is a 10% nudge and 1 puts the
 character's center at the edge; zoom scales about the character's center (1 is the default head-to-hips framing,
 smaller shows more of the body, e.g. 0.4 for a full body); pitch tilts the camera in degrees, positive looking up
-from below (a low angle, e.g. 25 to look up at the neck) and negative looking down from above. The same units apply
-to VRM and LivLiv. Instead of guessing numbers, pass `view` as one of the named presets (also listed in `/info`
+from below (a low angle, e.g. 25 to look up at the neck) and negative looking down from above; yaw orbits the camera
+around the character in degrees, positive to the character's left (e.g. 45 for a side view) — VRM only, ignored for
+LivLiv. From a side view the character looks at the lens: the head turns 70% of the yaw and the eyes the rest (clamped
+to their ±25° range). `gaze` (0..1, default 1) scales that turn — 1 looks at the lens, 0 keeps facing forward (a
+profile shot), 0.5 turns halfway. The same units apply to VRM and LivLiv. Instead of guessing numbers, pass `view` as one of the named presets (also listed in `/info`
 under `views`): `full` (whole body), `half` (waist up), `bust` (chest up, the default framing), `face` (face
-close-up), `neck` (low angle, neck + face from below), `low` (low angle, full upper body). A `view` object
-`{x,y,zoom,pitch}` still works for a custom framing. The base names are tuned for portrait 9:16 (the service
+close-up), `neck` (low angle, neck + face from below), `low` (low angle, full upper body), `side` (45° side view, head + eyes to the lens). A `view` object
+`{x,y,zoom,pitch,yaw,gaze}` still works for a custom framing. The base names are tuned for portrait 9:16 (the service
 default); each also has an explicit `-portrait` twin (same values) and a `-landscape` twin whose zoom is scaled
 down — in landscape the camera fits to the height, so the same zoom frames tighter (e.g. `full` is 0.4 in
 portrait but 0.3 in landscape, or the feet get cut). Use the twin that matches the job's orientation. To switch cameras mid-shot, pass `viewTimeline [{t, view}]`
 — `t` is seconds from audio start (same base as the expression timeline), `view` is a preset alias or a
-`{x,y,zoom,pitch}` object; the latest entry whose `t` has passed wins (an immediate cut, no interpolation), and
+`{x,y,zoom,pitch,yaw,gaze}` object; the latest entry whose `t` has passed wins (an immediate cut, no interpolation), and
 before the first entry the base `view` applies.
 `/info` also lists model capabilities under `live2dModels`, `vrmModels` and `livlivModels` (see below), so a client can discover
 motion/expression/outfit aliases instead of guessing them. Guards: min free VRAM / disk / shm, MAX_PIXELS, MAX_FRAMES.
@@ -108,15 +111,17 @@ e.g. a greeting at 0s while speaking, idle in between, another gesture at 10s. S
   keyframe times in the binary chunk — not from the JSON `min`/`max`, which some exporters omit (a file whose JSON
   says 0s can really be 15.8s). Read `/info` to learn the lengths instead of guessing them.
 - Job param: `animations: [{file, t}]` (VRM only; rejected for Live2D/LivLiv jobs). `t` is seconds from audio start,
-  the same base as `timeline` and `actions`. Each clip plays once for its own length. The latest clip whose `t` has
-  passed and which has not finished overrides the one playing — a new clip cuts in immediately, no blending, no
-  queue. When no clip is playing, the idle resumes. If a clip's `t` is past the job's end it simply never plays.
+  the same base as `timeline` and `actions`. Each clip plays once for its own length. Switches blend instead of
+  cutting: a new clip crossfades in over 0.3s (the outgoing clip fades out over the same 0.3s), and a clip ending
+  eases back to idle over its last 0.3s. When no clip is playing, the idle resumes. If a clip's `t` is past the
+  job's end it simply never plays.
 - Stacking: expressions (`timeline`) and lip-sync (audio) stack with clips — they drive the face, clips drive the
   body, and `.vrma` files carry no expression tracks. The fixed one-shot `actions` (nod/shake/tilt/hop/shy) are
   skipped while a clip owns the bones. The idle keeps running underneath a clip for the bones the clip does not
   animate (breath, blink, eye look), so the face stays alive during a gesture.
-- Determinism: clips are frame-stepped (`mixer.setTime` per frame, never a running clock), so the same job renders
-  identically — verified by rendering twice and comparing frames (see the M4 determinism check for Live2D).
+- Determinism: clips are frame-stepped (each action's `time` is set from the frame time and `mixer.update(0)`
+  applies it, never a running clock), so the same job renders identically — verified by rendering twice and
+  comparing frames (see the M4 determinism check for Live2D).
 - Player hook: the page (`render.html`) loads clips with `@pixiv/three-vrm-animation` (`VRMAnimationLoaderPlugin`
   + `createVRMAnimationClip`) and applies the active one in `VrmBody.onBeforeRender` (a hook in `src/vrm.ts`,
   called after the pose is written to the bones and before the model updates), so a clip overrides the pose's bones

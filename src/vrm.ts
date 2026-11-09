@@ -70,6 +70,8 @@ export class VrmBody implements Body {
   private visHalfH = 1
   /** the camera pitch place() last used (degrees), so render() re-places when it changes */
   private pitch = 0
+  /** the camera yaw place() last used (degrees), so render() re-places when it changes */
+  private yaw = 0
   private has = new Set<string>()
   private canvas: HTMLCanvasElement | null = null
   private headAt = { x: 0.5, y: 0.25 }
@@ -191,21 +193,23 @@ export class VrmBody implements Body {
   }
 
   /** the camera where the framing fits the canvas's aspect; pitchDeg tilts it in degrees, positive dropping the
-   *  camera below the character's center and looking up at it (a low angle), negative raising it and looking down */
-  private place(aspect: number, pitchDeg = 0) {
+   *  camera below the character's center and looking up at it (a low angle), negative raising it and looking down;
+   *  yawDeg orbits it around the character in degrees, positive to the character's left (a side view) */
+  private place(aspect: number, pitchDeg = 0, yawDeg = 0) {
     const c = this.camera, half = this.frame.height / 2
     // tall enough for the height, wide enough for the shoulders and arms on narrow canvases
     const dist = Math.max(half, this.width / 2 / aspect) / Math.tan((c.fov * D) / 2)
     this.visHalfH = Math.max(half, this.width / 2 / aspect)
     this.pitch = pitchDeg
+    this.yaw = yawDeg
     c.aspect = aspect
-    const p = pitchDeg * D
-    c.position.set(0, this.frame.y - dist * Math.sin(p), dist * Math.cos(p))
+    const p = pitchDeg * D, y = yawDeg * D
+    c.position.set(dist * Math.cos(p) * Math.sin(y), this.frame.y - dist * Math.sin(p), dist * Math.cos(p) * Math.cos(y))
     c.lookAt(0, this.frame.y, 0)
     c.updateProjectionMatrix()
   }
 
-  render(canvas: HTMLCanvasElement, { params: P, move, expr, pitch }: Pose, w: number, h: number, dt: number) {
+  render(canvas: HTMLCanvasElement, { params: P, move, expr, pitch, yaw, gaze }: Pose, w: number, h: number, dt: number) {
     const THREE = this.THREE, vrm = this.vrm
     if (!vrm) return
     if (!this.renderer || this.canvas !== canvas) {
@@ -215,13 +219,17 @@ export class VrmBody implements Body {
       this.canvas = canvas
     }
     if (canvas.width !== w || canvas.height !== h) this.renderer.setSize(w, h, false)
-    if (this.camera.aspect !== w / h || this.pitch !== pitch) this.place(w / h, pitch)  // a new character's camera, on a canvas already this size too
+    if (this.camera.aspect !== w / h || this.pitch !== pitch || this.yaw !== yaw) this.place(w / h, pitch, yaw)  // a new character's camera, on a canvas already this size too
     const b = this.bones, s = this.flip
     // the head turns most, the neck some (yaw: to the screen's right; pitch: up; roll: its top to the screen's right, as a
     // Player's does). The neck is optional in VRM: without one the head takes it all
     const hk = b.neck ? 0.65 : 1
-    b.neck?.rotation.set(-s * P.angleY * D * 0.35, P.angleX * D * 0.35, -s * P.angleZ * D * 0.35)
-    b.head?.rotation.set(-s * P.angleY * D * hk, P.angleX * D * hk, -s * P.angleZ * D * hk)
+    // gaze: the head and eyes follow the camera's yaw so the character looks at the lens from a side view. The head
+    // takes 70% of the yaw (split neck/head as usual), the eyes the rest, clamped to their ±25° range; `gaze`
+    // (0..1, the view's) scales it — 1 looks at the lens, 0 keeps facing forward
+    const gazeYaw = yaw * 0.7 * gaze
+    b.neck?.rotation.set(-s * P.angleY * D * 0.35, P.angleX * D * 0.35 + gazeYaw * D * 0.35, -s * P.angleZ * D * 0.35)
+    b.head?.rotation.set(-s * P.angleY * D * hk, P.angleX * D * hk + gazeYaw * D * hk, -s * P.angleZ * D * hk)
     b.spine?.rotation.set(0, P.bodyX * D * 0.8, -s * P.bodyZ * D * 0.8)
     b.chest?.rotation.set(-s * (P.breath - 0.5) * 0.02, 0, 0)
     // the view, in shares of the visible frame (what View promises, and what
@@ -247,7 +255,7 @@ export class VrmBody implements Body {
       for (const [id, n] of this.custom) set(n, expr[id] ?? 0)
     }
     // three-vrm's pitch is positive looking down
-    if (vrm.lookAt) { vrm.lookAt.yaw = P.eyeBallX * 25; vrm.lookAt.pitch = -P.eyeBallY * 15 }
+    if (vrm.lookAt) { vrm.lookAt.yaw = Math.max(-25, Math.min(25, P.eyeBallX * 25 + yaw * 0.3 * gaze)); vrm.lookAt.pitch = -P.eyeBallY * 15 }
     this.onBeforeRender?.()
     vrm.update(dt)
     this.renderer.render(this.scene, this.camera)

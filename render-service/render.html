@@ -22,21 +22,21 @@ window.player=player; window.ready=false; window.err=null;
 // one-shot actions (window.act) are skipped while a clip owns the bones.
 let anims=[];
 try{ anims=JSON.parse(q.get('anims')||'[]') }catch(e){ anims=[] }
-// Camera cuts over time (job `viewTimeline`): [{t,x,y,zoom,pitch}] — the
+// Camera cuts over time (job `viewTimeline`): [{t,x,y,zoom,pitch,yaw,gaze}] — the
 // latest entry whose t has passed wins (immediate cut); before the first
-// entry the base view (vx/vy/zoom/pitch) applies. Same time base as the
+// entry the base view (vx/vy/zoom/pitch/yaw/gaze) applies. Same time base as the
 // expression timeline (t = seconds from audio start).
 let viewtl=[];
 try{ viewtl=JSON.parse(q.get('viewtl')||'[]') }catch(e){ viewtl=[] }
 function viewAt(t){ let v=null; for(const e of viewtl){ if(e.t<=t) v=e; else break } return v }
 const pre=+(q.get('pre')||0);
 let clock=0, curT=-pre; // t of the frame about to render (clock counts from job start; pre counts down to audio start)
-let mixer=null, clips=[], curClip=-1;
+let mixer=null, clips=[];
 function activeClipAt(t){ let idx=-1; for(let i=0;i<clips.length;i++){ const c=clips[i]; if(c.t<=t&&t<c.t+c.duration) idx=i } return idx }
 try{
   await player.load(q.get('vrm'));
   try{player.setExpression(null)}catch(e){}
-  player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1); player.view.pitch=+(q.get('pitch')||0);
+  player.view.x=+(q.get('vx')||0); player.view.y=+(q.get('vy')||0); player.view.zoom=+(q.get('zoom')||1); player.view.pitch=+(q.get('pitch')||0); player.view.yaw=+(q.get('yaw')||0); player.view.gaze=+(q.get('gaze')||1);
   const amb=q.get('amb'), dir=q.get('dir');
   body.scene.traverse(o=>{ if(o.isAmbientLight&&amb) o.intensity=+amb; if(o.isDirectionalLight&&dir) o.intensity=+dir });
   if(anims.length){
@@ -59,14 +59,34 @@ try{
     // runs inside VrmBody.render(), after the pose is written to the bones
     // and before the model updates: the clip overrides the pose's bones for
     // the tracks it has, the idle keeps the rest (breath, blink, eyes).
-    body.onBeforeRender=()=>{
-      const idx=activeClipAt(curT);
-      if(idx<0){ if(curClip>=0){ clips[curClip].action.stop(); curClip=-1 } return }
-      if(idx!==curClip){ if(curClip>=0) clips[curClip].action.stop(); curClip=idx; clips[curClip].action.play() }
-      mixer.setTime(curT-clips[curClip].t);
+    // Switches blend instead of cutting: each clip has a fade envelope —
+    // ramps 0→1 over FADE after its t, holds, then ramps 1→0 over the last
+    // FADE back to idle — so a new clip crossfades with the one it replaces
+    // and a clip ending eases back to idle. Weights and per-action times
+    // are set from the frame time (curT), so the render stays deterministic.
+    const FADE = 0.3;
+    body.onBeforeRender = () => {
+      const weightAt = (c, t) => {
+        const dt = t - c.t;
+        if (dt < 0 || dt >= c.duration) return 0;
+        return Math.min(dt / FADE, (c.duration - dt) / FADE, 1);
+      };
+      let any = false;
+      for (const c of clips) {
+        const w = weightAt(c, curT);
+        if (w > 0) {
+          if (!c.playing) { c.action.play(); c.playing = true; }
+          c.action.time = curT - c.t;
+          c.action.setEffectiveWeight(w);
+          any = true;
+        } else if (c.playing) {
+          c.action.stop(); c.playing = false;
+        }
+      }
+      if (any) mixer.update(0);
     };
   }
-  window.step=(mouth,dt)=>{ curT=clock-pre; const v=viewAt(curT); if(v){ player.view.x=v.x; player.view.y=v.y; player.view.zoom=v.zoom; player.view.pitch=v.pitch } player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); clock+=dt; return 1 };
+  window.step=(mouth,dt)=>{ curT=clock-pre; const v=viewAt(curT); if(v){ player.view.x=v.x; player.view.y=v.y; player.view.zoom=v.zoom; player.view.pitch=v.pitch; player.view.yaw=v.yaw; player.view.gaze=v.gaze } player.params.mouthOpen=Math.max(0,Math.min(1,mouth)); player.params.vowel=0; player.draw(dt); clock+=dt; return 1 };
   window.setExprs=m=>player.setExpressions(m);
   window.act=n=>{ if(activeClipAt(curT)>=0) return; try{player.act(n)}catch(e){} };
   window.exprIds=()=>player.expressions.map(e=>e.id);

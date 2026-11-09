@@ -17,7 +17,7 @@ export interface BodyExpression { id: string; label: string; labels?: Labels }
 
 /** one frame's pose, as a Body draws it: the params, the picture's move (x, y shares of the canvas, y up; s a scale)
  *  and each expression's weight (0..1, eased) */
-export interface Pose { params: Params; move: { x: number; y: number; s: number }; expr: Record<string, number>; pitch: number }
+export interface Pose { params: Params; move: { x: number; y: number; s: number }; expr: Record<string, number>; pitch: number; yaw: number; gaze: number }
 
 export interface Body {
   /** what kind of character it draws ('png', 'vrm', ...): BodyInfo.format */
@@ -73,7 +73,7 @@ export class BodyPlayer extends PlayerBase<BodyInfo> {
 
   constructor(canvas: HTMLCanvasElement, body: Body, options: BodyPlayerOptions = {}) {
     claimCanvas(canvas)
-    const pose: Pose = { params: defaultParams(), move: { x: 0, y: 0, s: 1 }, expr: {}, pitch: 0 }
+    const pose: Pose = { params: defaultParams(), move: { x: 0, y: 0, s: 1 }, expr: {}, pitch: 0, yaw: 0, gaze: 1 }
     super(canvas, pose.params, options)
     this.pose = pose
     this.body = body
@@ -140,6 +140,8 @@ export class BodyPlayer extends PlayerBase<BodyInfo> {
     const f = this.frame, V = this.view
     this.pose.move = { x: f.move.x + V.x, y: f.move.y + this.actions.y + V.y, s: f.move.s * V.zoom }
     this.pose.pitch = V.pitch
+    this.pose.yaw = V.yaw
+    this.pose.gaze = V.gaze
     const dpr = Math.min(this.maxPixelRatio, window.devicePixelRatio || 1)
     const w = Math.round(this.canvas.clientWidth * dpr), h = Math.round(this.canvas.clientHeight * dpr)
     if (w >= 2 && h >= 2) this.body.render(this.canvas, this.pose, w, h, dt)

@@ -34,9 +34,11 @@ export interface PlayerOptions {
 /** where the character sits in the canvas: x, y move it by shares of the visible frame (y up), where 1 is the
  *  full frame — so 0.1 is a 10% nudge and 1 puts its center at the edge; zoom scales it about the character's
  *  center (1 is the default framing, smaller shows more of the body); pitch tilts the camera in degrees, positive
- *  looking up from below (a low angle) and negative looking down from above; head: frame the head instead of the
- *  whole drawing (avatars, chat bubbles; a BodyPlayer does not use it) */
-export interface View { x: number; y: number; zoom: number; head: boolean; pitch: number }
+ *  looking up from below (a low angle) and negative looking down from above; yaw orbits the camera around the
+ *  character in degrees, positive to the character's left (a side view); gaze scales how much the head and eyes
+ *  turn to follow the camera's yaw (1 looks at the lens, 0 keeps facing forward); head: frame the head instead of
+ *  the whole drawing (avatars, chat bubbles; a BodyPlayer does not use it) */
+export interface View { x: number; y: number; zoom: number; head: boolean; pitch: number; yaw: number; gaze: number }
 
 /** one frame being put together, as a driver sees it */
 export interface Frame {
@@ -133,7 +135,7 @@ export abstract class PlayerBase<Info extends { expressions: { id: string }[] }>
   idle: boolean
   /** see PlayerOptions.followPointer */
   followPointer: 'page' | 'canvas' | false
-  readonly view: View = { x: 0, y: 0, zoom: 1, head: false, pitch: 0 }
+  readonly view: View = { x: 0, y: 0, zoom: 1, head: false, pitch: 0, yaw: 0, gaze: 1 }
   /** see PlayerOptions.lang */
   readonly lang: string
   /** Called when the canvas's WebGL context is lost (a phone reclaiming the page's GPU memory, a driver reset, too many

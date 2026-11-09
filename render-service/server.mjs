@@ -33,9 +33,9 @@ const live2dCaps=name=>{ const cfg=live2dConfig(name); if(!cfg) return null;
 // this list). Shared with /info so an agent learns them from the API.
 const ACTIONS=['nod','shake','tilt','hop','shy'];
 // Named camera presets ("views"): a job may pass view as one of these
-// aliases instead of raw {x,y,zoom,pitch} numbers, so an agent does not have
+// aliases instead of raw {x,y,zoom,pitch,yaw,gaze} numbers, so an agent does not have
 // to guess the framing. An object still wins when both are given shape:
-// view can be a string alias, or an object {x,y,zoom,pitch} (partial objects
+// view can be a string alias, or an object {x,y,zoom,pitch,yaw,gaze} (partial objects
 // fall back to the defaults, not to an alias). Shared with /info.
 // The base names (full/half/...) are tuned for portrait 9:16 (the service
 // default); each also has an explicit -portrait twin (same values) and a
@@ -44,24 +44,27 @@ const ACTIONS=['nod','shake','tilt','hop','shy'];
 // needs a smaller zoom to keep the feet in frame (verified: full is 0.4 in
 // portrait, 0.3 in landscape).
 const VIEWS={
-  full:{x:0,y:0,zoom:0.4,pitch:0},      // whole body, head to toe
-  half:{x:0,y:0,zoom:0.7,pitch:0},      // waist up
-  bust:{x:0,y:0,zoom:1,pitch:0},        // chest up (the default framing)
-  face:{x:0,y:-0.35,zoom:2,pitch:0},    // face close-up
-  neck:{x:0,y:0,zoom:1.5,pitch:25},     // low angle, neck + face from below
-  low:{x:0,y:0,zoom:1,pitch:25},        // low angle, full upper body
-  'full-portrait':{x:0,y:0,zoom:0.4,pitch:0},
-  'half-portrait':{x:0,y:0,zoom:0.7,pitch:0},
-  'bust-portrait':{x:0,y:0,zoom:1,pitch:0},
-  'face-portrait':{x:0,y:-0.35,zoom:2,pitch:0},
-  'neck-portrait':{x:0,y:0,zoom:1.5,pitch:25},
-  'low-portrait':{x:0,y:0,zoom:1,pitch:25},
-  'full-landscape':{x:0,y:0,zoom:0.3,pitch:0},
-  'half-landscape':{x:0,y:0,zoom:0.5,pitch:0},
-  'bust-landscape':{x:0,y:0,zoom:0.75,pitch:0},
-  'face-landscape':{x:0,y:-0.35,zoom:1.5,pitch:0},
-  'neck-landscape':{x:0,y:0,zoom:1.1,pitch:25},
-  'low-landscape':{x:0,y:0,zoom:0.75,pitch:25},
+  full:{x:0,y:0,zoom:0.4,pitch:0,yaw:0,gaze:1},      // whole body, head to toe
+  half:{x:0,y:0,zoom:0.7,pitch:0,yaw:0,gaze:1},      // waist up
+  bust:{x:0,y:0,zoom:1,pitch:0,yaw:0,gaze:1},        // chest up (the default framing)
+  face:{x:0,y:-0.35,zoom:2,pitch:0,yaw:0,gaze:1},    // face close-up
+  neck:{x:0,y:0,zoom:1.5,pitch:25,yaw:0,gaze:1},     // low angle, neck + face from below
+  low:{x:0,y:0,zoom:1,pitch:25,yaw:0,gaze:1},        // low angle, full upper body
+  side:{x:0,y:0,zoom:1,pitch:0,yaw:45,gaze:1},       // 45° side view, head + eyes turn to the lens
+  'full-portrait':{x:0,y:0,zoom:0.4,pitch:0,yaw:0,gaze:1},
+  'half-portrait':{x:0,y:0,zoom:0.7,pitch:0,yaw:0,gaze:1},
+  'bust-portrait':{x:0,y:0,zoom:1,pitch:0,yaw:0,gaze:1},
+  'face-portrait':{x:0,y:-0.35,zoom:2,pitch:0,yaw:0,gaze:1},
+  'neck-portrait':{x:0,y:0,zoom:1.5,pitch:25,yaw:0,gaze:1},
+  'low-portrait':{x:0,y:0,zoom:1,pitch:25,yaw:0,gaze:1},
+  'side-portrait':{x:0,y:0,zoom:1,pitch:0,yaw:45,gaze:1},
+  'full-landscape':{x:0,y:0,zoom:0.3,pitch:0,yaw:0,gaze:1},
+  'half-landscape':{x:0,y:0,zoom:0.5,pitch:0,yaw:0,gaze:1},
+  'bust-landscape':{x:0,y:0,zoom:0.75,pitch:0,yaw:0,gaze:1},
+  'face-landscape':{x:0,y:-0.35,zoom:1.5,pitch:0,yaw:0,gaze:1},
+  'neck-landscape':{x:0,y:0,zoom:1.1,pitch:25,yaw:0,gaze:1},
+  'low-landscape':{x:0,y:0,zoom:0.75,pitch:25,yaw:0,gaze:1},
+  'side-landscape':{x:0,y:0,zoom:0.75,pitch:0,yaw:45,gaze:1},
 };
 // VRM expressions, read from the file itself (no three-vrm on the server):
 // parse the GLB JSON chunk only, then replicate what the player reports
@@ -196,12 +199,12 @@ function validate(b){
     width:Math.round(num(b.width,720,64,2048,'width')), height:Math.round(num(b.height,1280,64,2048,'height')), fps:num(b.fps,24,1,30,'fps'),
     amb:num(b.amb,0,0,3,'amb'), dir:b.dir===undefined?null:num(b.dir,Math.PI,0,10,'dir'), gain:num(b.gain,0.65,0,1,'gain'),
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
-    view:(()=>{ const v=typeof b.view==='string'?VIEWS[b.view]:b.view; if(typeof b.view==='string'&&!v) throw new Error(`unknown view "${b.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {x:num(o.x,0,-2,2,'view.x'),y:num(o.y,0,-2,2,'view.y'),zoom:num(o.zoom,1,0.2,5,'view.zoom'),pitch:num(o.pitch,0,-60,60,'view.pitch')} })(),
+    view:(()=>{ const v=typeof b.view==='string'?VIEWS[b.view]:b.view; if(typeof b.view==='string'&&!v) throw new Error(`unknown view "${b.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {x:num(o.x,0,-2,2,'view.x'),y:num(o.y,0,-2,2,'view.y'),zoom:num(o.zoom,1,0.2,5,'view.zoom'),pitch:num(o.pitch,0,-60,60,'view.pitch'),yaw:num(o.yaw,0,-180,180,'view.yaw'),gaze:num(o.gaze,1,0,1,'view.gaze')} })(),
     // Camera cuts over time: [{t, view}] — view is a preset alias or a
     // {x,y,zoom,pitch} object, same as `view`. The latest entry whose t has
     // passed wins (an immediate cut, no interpolation); before the first
     // entry the base `view` applies. Same time base as timeline/actions.
-    viewTimeline:Array.isArray(b.viewTimeline)?b.viewTimeline.slice(0,200).map(k=>{ const v=typeof k.view==='string'?VIEWS[k.view]:k.view; if(typeof k.view==='string'&&!v) throw new Error(`unknown view "${k.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {t:num(k.t,0,-10,120,'viewTimeline.t'),x:num(o.x,0,-2,2,'viewTimeline.x'),y:num(o.y,0,-2,2,'viewTimeline.y'),zoom:num(o.zoom,1,0.2,5,'viewTimeline.zoom'),pitch:num(o.pitch,0,-60,60,'viewTimeline.pitch')} }).sort((a,c)=>a.t-c.t):[],
+    viewTimeline:Array.isArray(b.viewTimeline)?b.viewTimeline.slice(0,200).map(k=>{ const v=typeof k.view==='string'?VIEWS[k.view]:k.view; if(typeof k.view==='string'&&!v) throw new Error(`unknown view "${k.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {t:num(k.t,0,-10,120,'viewTimeline.t'),x:num(o.x,0,-2,2,'viewTimeline.x'),y:num(o.y,0,-2,2,'viewTimeline.y'),zoom:num(o.zoom,1,0.2,5,'viewTimeline.zoom'),pitch:num(o.pitch,0,-60,60,'viewTimeline.pitch'),yaw:num(o.yaw,0,-180,180,'viewTimeline.yaw'),gaze:num(o.gaze,1,0,1,'viewTimeline.gaze')} }).sort((a,c)=>a.t-c.t):[],
     timeline:Array.isArray(b.timeline)?b.timeline.slice(0,500).map(k=>({t:num(k.t,0,-10,120,'timeline.t'),e:Object.fromEntries(Object.entries(k.e||{}).slice(0,20).map(([id,w])=>{ if(!/^[A-Za-z0-9_]{1,40}$/.test(id)) throw new Error('bad expression id'); return [id,num(w,1,0,1,'weight')] }))})).sort((a,c)=>a.t-c.t):[],
     actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!ACTIONS.includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[],
     // .vrma clips on a timeline (VRM only): each starts at t (seconds from
@@ -252,7 +255,7 @@ async function runJob(job){
   const total=p.pre+dur+p.post, frames=Math.ceil(total*p.fps); if(frames>MAX_FRAMES) throw new Error(`too many frames (${frames} > ${MAX_FRAMES})`);
   job.frames=frames; job.videoSec=+total.toFixed(2);
   const isL2d=!!p.live2d;
-  const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,pitch:p.view.pitch,idle:p.idle?'1':'0'});
+  const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,pitch:p.view.pitch,yaw:p.view.yaw,gaze:p.view.gaze,idle:p.idle?'1':'0'});
   if(p.vrm) q.set('vrm',`/assets/vrm/${p.vrm}`); else if(!isL2d) q.set('model',`/characters/${p.character}/`);
   if(p.dir!==null) q.set('dir',String(p.dir)); if(p.bg) q.set('bg',`/assets/bg/${p.bg}`); else if(p.bgColor) q.set('bgc',p.bgColor);
   if(p.animations.length){ q.set('anims',JSON.stringify(p.animations)); q.set('pre',String(p.pre)) }
