@@ -17,7 +17,10 @@ export interface BodyExpression { id: string; label: string; labels?: Labels }
 
 /** one frame's pose, as a Body draws it: the params, the picture's move (x, y shares of the canvas, y up; s a scale)
  *  and each expression's weight (0..1, eased) */
-export interface Pose { params: Params; move: { x: number; y: number; s: number }; expr: Record<string, number>; pitch: number; yaw: number; gaze: number }
+export interface Pose { params: Params; move: { x: number; y: number; s: number }; expr: Record<string, number>; pitch: number; yaw: number; gaze: number
+  /** the part of `move` that is the player's view (x, y, zoom), apart from the character's own motion (idle, actions): a Body
+   *  that moves the camera rather than the picture (a VRM in a 3D room) needs them apart */
+  view?: { x: number; y: number; zoom: number } }
 
 export interface Body {
   /** what kind of character it draws ('png', 'vrm', ...): BodyInfo.format */
@@ -73,7 +76,7 @@ export class BodyPlayer extends PlayerBase<BodyInfo> {
 
   constructor(canvas: HTMLCanvasElement, body: Body, options: BodyPlayerOptions = {}) {
     claimCanvas(canvas)
-    const pose: Pose = { params: defaultParams(), move: { x: 0, y: 0, s: 1 }, expr: {}, pitch: 0, yaw: 0, gaze: 1 }
+    const pose: Pose = { params: defaultParams(), move: { x: 0, y: 0, s: 1 }, expr: {}, pitch: 0, yaw: 0, gaze: 1, view: { x: 0, y: 0, zoom: 1 } }
     super(canvas, pose.params, options)
     this.pose = pose
     this.body = body
@@ -139,6 +142,7 @@ export class BodyPlayer extends PlayerBase<BodyInfo> {
   protected show(dt: number) {
     const f = this.frame, V = this.view
     this.pose.move = { x: f.move.x + V.x, y: f.move.y + this.actions.y + V.y, s: f.move.s * V.zoom }
+    this.pose.view = { x: V.x, y: V.y, zoom: V.zoom }
     this.pose.pitch = V.pitch
     this.pose.yaw = V.yaw
     this.pose.gaze = V.gaze

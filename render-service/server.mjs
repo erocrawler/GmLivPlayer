@@ -1,6 +1,7 @@
 // render-service: GPU frame-stepped VRM renderer behind a small HTTP API (one job at a time).
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path'; import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process'; import { chromium } from 'playwright-core';
+import { checkBg3dConfig, roomView } from './bg3d-config.mjs';
 const ROOT=process.env.RENDER_ROOT||'/workspace/plana-render', PLAYER=ROOT+'/player', ASSETS=ROOT+'/assets', JOBS=ROOT+'/jobs';
 const PORT=+(process.env.PORT||18189), INTERNAL=+(process.env.INTERNAL_PORT||18190);
 const KEY=fs.readFileSync(ROOT+'/.key','utf8').trim();
@@ -145,13 +146,35 @@ const livlivCaps=id=>{ try{ const m=JSON.parse(fs.readFileSync(`${PLAYER}/charac
     :(Array.isArray(m.layers)&&m.layers.some(l=>l.id==='expr_smile')?['smile']:[]);
   return {name:typeof m.name==='string'?m.name:null, expressions:exprs, actions:ACTIONS};
 }catch{ return null } };
+// ---- bg3d: a 3D room (GLB) behind a VRM, in the same scene (player src/room.ts) ----
+// Files live in ASSETS/bg3d: <name>.glb and, beside it, <name>.bg.json (the room's configuration: lights, tone mapping,
+// sky, shadows, unitsPerMeter, where the character stands, credit). The GLB is never modified; the page adjusts its
+// in-memory copy. The configuration is read and checked HERE (strictly: an unknown key or a number out of range is an
+// error, so a typo cannot silently do nothing) and handed to the page as JSON — the page never fetches it itself.
+// `credit` is fixed server-side per room, like Live2D's: the request cannot override or disable it.
+const bg3dGlb=name=>`${ASSETS}/bg3d/${name}`;
+const bg3dCfgName=name=>name.replace(/\.glb$/i,'')+'.bg.json';
+const readBg3dConfig=name=>{ const f=bg3dGlb(bg3dCfgName(name)); if(!fs.existsSync(f)) return null;
+  let raw; try{ raw=JSON.parse(fs.readFileSync(f,'utf8')) }catch(e){ throw new Error(`bg3d config ${bg3dCfgName(name)} is not valid JSON: ${e.message}`) }
+  return checkBg3dConfig(raw) };
+// what /info says of a room: its configuration as read, and the camera and lights the GLB itself declares (JSON chunk only)
+function bg3dCaps(name){
+  const file=bg3dGlb(name); const j=vrmGlbJson(file); if(!j) return null;
+  let config=null, error; try{ config=readBg3dConfig(name) }catch(e){ error=String(e.message||e) }
+  const cam=(j.cameras||[]).find(c=>c.type==='perspective'||c.perspective)?.perspective;
+  const lights=(j.extensions?.KHR_lights_punctual?.lights||[]).map(l=>({name:l.name,type:l.type,intensity:l.intensity}));
+  return {bytes:fs.statSync(file).size, config, configFile:config?bg3dCfgName(name):null, views:Object.keys(config?.views||{}), ...(error?{error}:{}), credit:config?.credit||null,
+    glb:{generator:j.asset?.generator||null, nodes:(j.nodes||[]).length, meshes:(j.meshes||[]).length, extensionsRequired:j.extensionsRequired||[],
+      camera:cam?{yfovDeg:+(cam.yfov*180/Math.PI).toFixed(3),aspect:cam.aspectRatio??null}:null, lights}};
+}
+const bg3dRooms=()=>{ try{ return fs.readdirSync(`${ASSETS}/bg3d`).filter(f=>/\.glb$/i.test(f)&&fs.statSync(bg3dGlb(f)).isFile()) }catch{ return [] } };
 const FONT=(()=>{ try{ return execFileSync('fc-match',['-f','%{file}','WenQuanYi Zen Hei Mono'],{encoding:'utf8'}).trim() }catch{ return '' } })();
 const MIN_VRAM_MIB=1200, MIN_DISK_MB=1500, MAX_PIXELS=2.2e6, MAX_FRAMES=1800, KEEP_JOBS=10;
-for(const d of ['vrm','audio','bg','anim']) fs.mkdirSync(`${ASSETS}/${d}`,{recursive:true}); fs.mkdirSync(JOBS,{recursive:true});
+for(const d of ['vrm','audio','bg','anim','bg3d']) fs.mkdirSync(`${ASSETS}/${d}`,{recursive:true}); fs.mkdirSync(JOBS,{recursive:true});
 fs.rmSync(SHM,{recursive:true,force:true}); fs.mkdirSync(SHM,{recursive:true});
 const log=(...a)=>console.log(new Date().toISOString(),...a);
 const MIME={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.json':'application/json','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.wav':'audio/wav','.vrm':'application/octet-stream','.glb':'application/octet-stream','.mp4':'video/mp4','.css':'text/css','.map':'application/json'};
-const EXT={vrm:['.vrm','.glb'],audio:['.wav'],bg:['.png','.jpg','.jpeg','.webp'],anim:['.vrma']};
+const EXT={vrm:['.vrm','.glb'],audio:['.wav'],bg:['.png','.jpg','.jpeg','.webp'],anim:['.vrma'],bg3d:['.glb','.json']};
 // ---- internal static server (only for our own Chromium, bound to 127.0.0.1) ----
 http.createServer((req,res)=>{
   try{
@@ -195,16 +218,21 @@ function envelope({x,rate}){ // the player's own mouth envelope (src/runtime/spe
 const jobs=new Map(), queue=[]; let running=false;
 function validate(b){
   const num=(v,d,lo,hi,name)=>{ const x=v===undefined?d:+v; if(!Number.isFinite(x)||x<lo||x>hi) throw new Error(`${name} must be in [${lo}, ${hi}]`); return x };
-  const j={ vrm:b.vrm?String(b.vrm):null, character:b.character?String(b.character):null, live2d:b.live2d?String(b.live2d):null, motion:b.motion?String(b.motion):null, credit:b.credit===undefined?undefined:b.credit, audio:b.audio?String(b.audio):null, bg:b.bg?String(b.bg):null, bgColor:b.bgColor?String(b.bgColor):null,
+  // a string view: with a bg3d room, one of THAT room's views (its <name>.bg.json; the room is data, none is known here);
+  // otherwise the service's plain presets
+  let roomCfg=null; // read once here, because view and viewTimeline are resolved while the job is built; the checks of bg3d itself follow below
+  if(b.bg3d&&typeof b.bg3d==='string'&&safeName(b.bg3d)&&/\.glb$/i.test(b.bg3d)&&fs.existsSync(bg3dGlb(b.bg3d))) roomCfg=readBg3dConfig(b.bg3d)||{};
+  const presetView=name=>{ if(b.bg3d){ if(!roomCfg) throw new Error('unknown bg3d asset (a .glb under assets/bg3d, see /info bg3d)'); return roomView(name,roomCfg.views,b.bg3d) } const v=Object.hasOwn(VIEWS,name)?VIEWS[name]:undefined; if(!v) throw new Error(`unknown view "${name}" (have: ${Object.keys(VIEWS).join(', ')})`); return v };
+  const j={ vrm:b.vrm?String(b.vrm):null, character:b.character?String(b.character):null, live2d:b.live2d?String(b.live2d):null, motion:b.motion?String(b.motion):null, credit:b.credit===undefined?undefined:b.credit, audio:b.audio?String(b.audio):null, bg:b.bg?String(b.bg):null, bgColor:b.bgColor?String(b.bgColor):null, bg3d:b.bg3d?String(b.bg3d):null, ambSet:b.amb!==undefined, dirSet:b.dir!==undefined,
     width:Math.round(num(b.width,720,64,2048,'width')), height:Math.round(num(b.height,1280,64,2048,'height')), fps:num(b.fps,24,1,30,'fps'),
     amb:num(b.amb,0,0,3,'amb'), dir:b.dir===undefined?null:num(b.dir,Math.PI,0,10,'dir'), gain:num(b.gain,0.65,0,1,'gain'),
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
-    view:(()=>{ const v=typeof b.view==='string'?VIEWS[b.view]:b.view; if(typeof b.view==='string'&&!v) throw new Error(`unknown view "${b.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {x:num(o.x,0,-2,2,'view.x'),y:num(o.y,0,-2,2,'view.y'),zoom:num(o.zoom,1,0.2,5,'view.zoom'),pitch:num(o.pitch,0,-60,60,'view.pitch'),yaw:num(o.yaw,0,-180,180,'view.yaw'),gaze:num(o.gaze,1,0,1,'view.gaze')} })(),
+    view:(()=>{ const v=typeof b.view==='string'?presetView(b.view):b.view; const o=v||{}; return {x:num(o.x,0,-2,2,'view.x'),y:num(o.y,0,-2,2,'view.y'),zoom:num(o.zoom,1,0.2,5,'view.zoom'),pitch:num(o.pitch,0,-60,60,'view.pitch'),yaw:num(o.yaw,0,-180,180,'view.yaw'),gaze:num(o.gaze,1,0,1,'view.gaze'),lens:num(o.lens,1,1,4,'view.lens')} })(),
     // Camera cuts over time: [{t, view}] — view is a preset alias or a
     // {x,y,zoom,pitch} object, same as `view`. The latest entry whose t has
     // passed wins (an immediate cut, no interpolation); before the first
     // entry the base `view` applies. Same time base as timeline/actions.
-    viewTimeline:Array.isArray(b.viewTimeline)?b.viewTimeline.slice(0,200).map(k=>{ const v=typeof k.view==='string'?VIEWS[k.view]:k.view; if(typeof k.view==='string'&&!v) throw new Error(`unknown view "${k.view}" (have: ${Object.keys(VIEWS).join(', ')})`); const o=v||{}; return {t:num(k.t,0,-10,120,'viewTimeline.t'),x:num(o.x,0,-2,2,'viewTimeline.x'),y:num(o.y,0,-2,2,'viewTimeline.y'),zoom:num(o.zoom,1,0.2,5,'viewTimeline.zoom'),pitch:num(o.pitch,0,-60,60,'viewTimeline.pitch'),yaw:num(o.yaw,0,-180,180,'viewTimeline.yaw'),gaze:num(o.gaze,1,0,1,'viewTimeline.gaze')} }).sort((a,c)=>a.t-c.t):[],
+    viewTimeline:Array.isArray(b.viewTimeline)?b.viewTimeline.slice(0,200).map(k=>{ const v=typeof k.view==='string'?presetView(k.view):k.view; const o=v||{}; return {t:num(k.t,0,-10,120,'viewTimeline.t'),x:num(o.x,0,-2,2,'viewTimeline.x'),y:num(o.y,0,-2,2,'viewTimeline.y'),zoom:num(o.zoom,1,0.2,5,'viewTimeline.zoom'),pitch:num(o.pitch,0,-60,60,'viewTimeline.pitch'),yaw:num(o.yaw,0,-180,180,'viewTimeline.yaw'),gaze:num(o.gaze,1,0,1,'viewTimeline.gaze'),lens:num(o.lens,1,1,4,'viewTimeline.lens')} }).sort((a,c)=>a.t-c.t):[],
     timeline:Array.isArray(b.timeline)?b.timeline.slice(0,500).map(k=>({t:num(k.t,0,-10,120,'timeline.t'),e:Object.fromEntries(Object.entries(k.e||{}).slice(0,20).map(([id,w])=>{ if(!/^[A-Za-z0-9_]{1,40}$/.test(id)) throw new Error('bad expression id'); return [id,num(w,1,0,1,'weight')] }))})).sort((a,c)=>a.t-c.t):[],
     actions:Array.isArray(b.actions)?b.actions.slice(0,200).map(a=>{ if(b.live2d){ if(typeof a.name!=='string'||!/^[A-Za-z0-9_]{1,40}$/.test(a.name)) throw new Error('bad live2d action (must be a motion alias)'); } else if(!ACTIONS.includes(a.name)) throw new Error('bad action'); return {t:num(a.t,0,-10,120,'actions.t'),name:a.name} }).sort((a,c)=>a.t-c.t):[],
     // .vrma clips on a timeline (VRM only): each starts at t (seconds from
@@ -215,6 +243,14 @@ function validate(b){
     animations:Array.isArray(b.animations)?b.animations.slice(0,200).map(a=>{ if(typeof a.file!=='string'||!safeName(a.file)||!/\.vrma$/i.test(a.file)) throw new Error('bad animation file'); return {file:a.file,t:num(a.t,0,-10,120,'animations.t')} }).sort((a,c)=>a.t-c.t):[] };
   if(j.width*j.height>MAX_PIXELS) throw new Error(`too many pixels (max ${MAX_PIXELS})`);
   if((!!j.vrm)+(!!j.character)+(!!j.live2d)!==1) throw new Error('give exactly one of vrm, character or live2d');
+  if(!j.bg3d&&(j.view.lens!==1||j.viewTimeline.some(k=>k.lens!==1))) throw new Error('view.lens (a longer camera lens) is for bg3d rooms only');
+  if(j.bg3d){
+    if(!j.vrm) throw new Error('bg3d needs a vrm job (a room is drawn in the same 3D scene as the VRM; character and live2d jobs cannot use it)');
+    if(j.bg||j.bgColor) throw new Error('bg3d cannot be combined with bg or bgColor: the room supplies the whole picture');
+    if(!safeName(j.bg3d)||!/\.glb$/i.test(j.bg3d)||!fs.existsSync(bg3dGlb(j.bg3d))) throw new Error('unknown bg3d asset (a .glb under assets/bg3d, see /info bg3d)');
+    const config=roomCfg||{}; // (read above) a malformed or unknown-key configuration is a 400 with the reason
+    j.bg3d={file:j.bg3d,config,credit:config.credit||null};
+  }
   if(j.vrm&&(!safeName(j.vrm)||!fs.existsSync(`${ASSETS}/vrm/${j.vrm}`))) throw new Error('unknown vrm asset');
   if(j.character){
     if(!/^[A-Za-z0-9_]{1,20}$/.test(j.character)||!fs.existsSync(`${PLAYER}/characters/${j.character}/model.json`)) throw new Error('unknown character');
@@ -237,6 +273,8 @@ function validate(b){
   }
   if(j.vrm&&j.credit===undefined&&VRM_CREDIT[j.vrm]) j.credit=VRM_CREDIT[j.vrm];
   if(j.credit!==undefined&&j.credit!==false&&j.credit!==null&&(typeof j.credit!=='string'||j.credit.length>160||/[\u0000-\u001f]/.test(j.credit))) throw new Error('credit must be a string (<=160 chars, no control chars), or false');
+  // a room's credit is fixed server-side and added to whatever the model's credit is; the request cannot drop it
+  if(j.bg3d?.credit){ const own=typeof j.credit==='string'&&j.credit?j.credit:''; j.credit=own?`${own} | ${j.bg3d.credit}`:j.bg3d.credit }
   if(j.audio&&(!safeName(j.audio)||!fs.existsSync(`${ASSETS}/audio/${j.audio}`))) throw new Error('unknown audio asset');
   if(j.bg&&(!safeName(j.bg)||!fs.existsSync(`${ASSETS}/bg/${j.bg}`))) throw new Error('unknown bg asset');
   if(j.animations.length&&!j.vrm) throw new Error('animations need a vrm job');
@@ -255,9 +293,11 @@ async function runJob(job){
   const total=p.pre+dur+p.post, frames=Math.ceil(total*p.fps); if(frames>MAX_FRAMES) throw new Error(`too many frames (${frames} > ${MAX_FRAMES})`);
   job.frames=frames; job.videoSec=+total.toFixed(2);
   const isL2d=!!p.live2d;
-  const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,pitch:p.view.pitch,yaw:p.view.yaw,gaze:p.view.gaze,idle:p.idle?'1':'0'});
+  const q=new URLSearchParams({w:p.width,h:p.height,amb:String(p.amb),vx:p.view.x,vy:p.view.y,zoom:p.view.zoom,pitch:p.view.pitch,yaw:p.view.yaw,gaze:p.view.gaze,lens:p.view.lens,idle:p.idle?'1':'0'});
   if(p.vrm) q.set('vrm',`/assets/vrm/${p.vrm}`); else if(!isL2d) q.set('model',`/characters/${p.character}/`);
   if(p.dir!==null) q.set('dir',String(p.dir)); if(p.bg) q.set('bg',`/assets/bg/${p.bg}`); else if(p.bgColor) q.set('bgc',p.bgColor);
+  if(p.bg3d){ q.set('bg3d',`/assets/bg3d/${p.bg3d.file}`); q.set('bg3dcfg',JSON.stringify(Object.fromEntries(Object.entries(p.bg3d.config).filter(([k])=>k!=='views')))); // views were resolved into the job's numbers here; // amb/dir override the room's character lights only when the request gave them
+    if(p.ambSet) q.set('camb',String(p.amb)); if(p.dirSet&&p.dir!==null) q.set('cdir',String(p.dir)) }
   if(p.animations.length){ q.set('anims',JSON.stringify(p.animations)); q.set('pre',String(p.pre)) }
   if(p.viewTimeline.length) q.set('viewtl',JSON.stringify(p.viewTimeline));
   const browser=await chromium.launch({args:['--use-gl=angle','--use-angle=gl-egl','--enable-gpu','--ignore-gpu-blocklist','--no-sandbox','--disable-gpu-sandbox']});
@@ -266,7 +306,8 @@ async function runJob(job){
     await page.goto(isL2d?`http://127.0.0.1:${INTERNAL}/render-live2d.html?model=${encodeURIComponent(p.live2d)}&res=${p.width}&core=purism`:`http://127.0.0.1:${INTERNAL}/${p.character?'render-livliv.html':'render.html'}?${q}`,{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.ready||window.err,null,{timeout:180000});
     const err=await page.evaluate(()=>window.err); if(err) throw new Error('page: '+err);
-    job.renderer=await page.evaluate(()=>window.renderer()); const ids=await page.evaluate(()=>window.exprIds());
+    job.renderer=await page.evaluate(()=>window.renderer());
+    if(p.bg3d){ job.room=await page.evaluate(()=>window.roomInfo()); log('job',job.id,'room',JSON.stringify({file:p.bg3d.file,stand:job.room?.stand,floorY:job.room?.floorY,floorFrom:job.room?.floorFrom,lightScale:job.room?.lightScale})) } const ids=await page.evaluate(()=>window.exprIds());
     for(const k of p.timeline) for(const id of Object.keys(k.e)) if(!ids.includes(id)) throw new Error(`unknown expression "${id}" (have: ${ids.join(', ')})`);
     if(isL2d){
       // Actions are one-shot motions on the Live2D page (window.act is the
@@ -309,20 +350,27 @@ async function pump(){
   running=false;
 }
 // ---- public API ----
-const pub=j=>({id:j.id,state:j.state,character:j.params?.character,live2d:j.params?.live2d,credit:j.params?.credit||undefined,progress:j.progress??0,frames:j.frames,videoSec:j.videoSec,renderSec:j.renderSec,renderer:j.renderer,bytes:j.bytes,error:j.error});
+const pub=j=>({id:j.id,state:j.state,character:j.params?.character,bg3d:j.params?.bg3d?.file,live2d:j.params?.live2d,credit:j.params?.credit||undefined,progress:j.progress??0,frames:j.frames,videoSec:j.videoSec,renderSec:j.renderSec,renderer:j.renderer,bytes:j.bytes,error:j.error});
 http.createServer(async(req,res)=>{
   try{
     const u=new URL(req.url,'http://x'), parts=u.pathname.split('/').filter(Boolean);
     if(req.method==='GET'&&u.pathname==='/health') return json(res,200,{ok:true});
     if(!okKey(req.headers['x-render-key'])) return json(res,401,{error:'unauthorized'});
     if(req.method==='GET'&&u.pathname==='/info'){ const l2=live2dModels(); const vr=vrmModels(), lv=livlivCharacters();
-      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,views:VIEWS,assets:Object.fromEntries(['vrm','audio','bg','anim'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
+      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,views:VIEWS,assets:Object.fromEntries(['vrm','audio','bg','anim','bg3d'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),bg3d:Object.fromEntries(bg3dRooms().map(f=>[f,bg3dCaps(f)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
     if(req.method==='PUT'&&parts[0]==='assets'&&parts.length===3){
       const [,kind,name]=parts; if(!EXT[kind]||!safeName(name)||!EXT[kind].includes(path.extname(name).toLowerCase())) return json(res,400,{error:'bad kind/name/extension'});
       if(freeDiskMB()<MIN_DISK_MB) return json(res,507,{error:'disk low'});
       const tmp=`${ASSETS}/${kind}/.${name}.${process.pid}.tmp`, out=fs.createWriteStream(tmp); let n=0, bad=false; const MAX=kind==='vrm'?200e6:60e6;
       req.on('data',c=>{ n+=c.length; if(n>MAX&&!bad){ bad=true; req.destroy(); out.destroy(); fs.rmSync(tmp,{force:true}); } }); req.pipe(out);
-      out.on('finish',()=>{ if(bad) return; const dest=`${ASSETS}/${kind}/${name}`; fs.renameSync(tmp,dest);
+      out.on('finish',()=>{ if(bad) return; const dest=`${ASSETS}/${kind}/${name}`;
+        if(kind==='bg3d'){ let why=null; // checked before it replaces a good file
+          if(/\.json$/i.test(name)){ if(!/\.bg\.json$/i.test(name)) why='a bg3d config must be named <room>.bg.json';
+            else try{ checkBg3dConfig(JSON.parse(fs.readFileSync(tmp,'utf8'))) }catch(e){ why=String(e.message||e) } }
+          else { const g=vrmGlbJson(tmp); if(!g) why='not a valid GLB';
+            else if(!(g.cameras||[]).some(c=>c.perspective)) why='the GLB has no perspective camera (every bg3d view is relative to the file\'s camera)' }
+          if(why){ fs.rmSync(tmp,{force:true}); return json(res,400,{error:'bg3d rejected: '+why}) } }
+        fs.renameSync(tmp,dest);
         if(kind==='anim'&&vrmaDuration(dest)===null){ fs.rmSync(dest,{force:true}); return json(res,400,{error:'not a valid .vrma (needs VRMC_vrm_animation + a keyframed animation)'}) }
         json(res,200,{ok:true,bytes:n}) }); return;
     }

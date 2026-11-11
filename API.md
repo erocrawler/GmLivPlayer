@@ -401,6 +401,14 @@ await vrm.load('/avatars/me.vrm')            // a URL, a File, or files picked
   A file compressed with Draco, Meshopt or KTX2 needs decoders, which the player does not ship: without them `load()` says
   so, and `new VrmBody({ configureLoader: (loader) => { /* setDRACOLoader, setMeshoptDecoder, setKTX2Loader */ } })` is where
   yours go. Animation files (`.vrma`) are not played.
+  `await vrmBody.setRoom({ url, config })` draws a glTF/GLB room in the same three.js scene as the VRM (before or after `load()`):
+  the file's own camera is the origin of the view (`view.yaw` / `pitch` orbit it around the character, `zoom` dollies toward
+  the character, `x` / `y` shift the lens), its lights light and shadow the character, and the character is scaled and put on
+  the floor in front of the camera (the room itself is never changed). `config` is a `RoomConfig` (see `src/room.ts`: light
+  scale, tone mapping, sky, shadows, `unitsPerMeter`, where the character stands). `roomInfo()` reports what it found.
+  `setRoomLens(n)` narrows the room camera's field of view (1: the file's, 2: half of it) without moving it, for close-ups
+  the dolly (`view.zoom`) cannot reach. Named camera presets of a room (`views` in its `.bg.json`) belong to the render service
+  (see `render-service/README.md`); the player only sees the numbers.
   A VRM carries its author's terms, and `load()` gives them in `model.meta` (`VrmTerms`), 1.0 and 0.x said alike: `author`,
   `license`, `use` (who may play it), `commercial`, `violence`, `sexual`, `redistribution` and `modification` (1.0 only), the
   file's own words in `raw`. The player does not enforce them. A page playing other people's avatars should show them and

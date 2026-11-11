@@ -5,6 +5,10 @@
 The featured characters are not in the npm package, so nothing here needs a new version.
 
 - 17 of the 21 featured characters rebuilt, as livliv.ai now shows them, and their covers redrawn.
+- `VrmBody.setRoom({ url, config })`: a glTF/GLB room behind a VRM, in one scene, with the file's own camera as the view's origin (see [API.md](API.md)). `Pose` gets an optional `view` (the view's part of `move`), for bodies that move a camera.
+- Rooms: camera presets are data. `<room>.bg.json` may carry `views` (`{ "full": { y, zoom, ... } }`, strictly checked); a bg3d job's `view` / `viewTimeline[].view` can then name one, and `/info` lists them. New view field `lens` (1–4, a longer lens: narrows the field of view without moving the camera), for close-ups that `zoom` (a dolly, capped at 5) cannot reach. The checked reading of `bg.json` moved to `render-service/bg3d-config.mjs` (deploy it next to `server.mjs`).
+- Rooms: `character.skyFill` now defaults to 1 (the room's whole sky; about 0.35 is neutral).
+- Rooms: `stand.depthM` (stand deeper in the room, stops at the room's floor edge / furniture), `character.brightness` (default 0.3) and `character.skyFill` (a toon material takes the room's sun without the N·L cosine and none of its sky: the character came out ~2.5× too bright and cream; both are per-character, the room is untouched).
 
 ## 0.3.0
 

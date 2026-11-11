@@ -10,6 +10,8 @@ import type { VRM } from '@pixiv/three-vrm'
 import type { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import type { Body, BodyExpression, BodyMeta, Pose } from './body'
 import { LivLivError, type LivLivErrorCode } from './errors'
+import { Room, resolveRoomConfig, type RoomConfig, type RoomInfo } from './room'
+export type { RoomConfig, RoomInfo } from './room'
 
 const FEELINGS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'] as const
 const LABELS: Record<(typeof FEELINGS)[number], Record<string, string>> = {
@@ -76,6 +78,15 @@ export class VrmBody implements Body {
   private canvas: HTMLCanvasElement | null = null
   private headAt = { x: 0.5, y: 0.25 }
   private width = 0.6
+  /** a 3D room behind the character (setRoom): when set, the camera is the room file's and the view is relative to it */
+  private room: Room | null = null
+  /** the room's sky and shadow settings go on the renderer when it is made (or made again) */
+  private roomReady = false
+  /** a room's camera lens (see room.ts): 1 is the file's field of view, 2 half of it */
+  private roomLens = 1
+  /** the character's own two lights (the room's matter more); the framing and feet measured at load, for placing it in a room */
+  private ownLights: { dir: T.DirectionalLight; amb: T.AmbientLight } | null = null
+  private gauge = { frameY: 1, feetY: 0, height: 1, baseRotY: 0 }
 
   /** the loaded VRM, once load() has resolved (a page playing an external animation — a .vrma clip — needs it to build its clips) */
   getVRM(): VRM | null { return this.vrm }
@@ -151,7 +162,8 @@ export class VrmBody implements Body {
     scene.add(vrm.scene)
     const light = new THREE.DirectionalLight(0xffffff, Math.PI)
     light.position.set(1, 1, 1).normalize()
-    scene.add(light, new THREE.AmbientLight(0xffffff, 0.6))
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6)
+    scene.add(light, ambient)
     // the head's top to the hips: what a LivLiv character's canvas shows of a person
     // in the model's own units, whatever they are (an exporter's unit can make a character 170 long), and its own shape
     // (a head as big as the rest of it)
@@ -185,9 +197,13 @@ export class VrmBody implements Body {
     this.blinkBoth = has.has('blink') && !(has.has('blinkLeft') && has.has('blinkRight'))
     this.flip = flip
     this.frame = { height: Math.max(1e-3, top - bottom), y: (top + bottom) / 2 }
+    this.ownLights = { dir: light, amb: ambient }
+    const feetY = Number.isFinite(box.min.y) ? box.min.y : 0
+    this.gauge = { frameY: this.frame.y, feetY, height: Math.max(1e-3, top - feetY), baseRotY: vrm.scene.rotation.y }
     this.width = Math.max(shoulders * 1.5, this.frame.height / 2)
     this.camera = new THREE.PerspectiveCamera(20, 2 / 3, this.frame.height / 100, this.frame.height * 100)
     this.place(2 / 3)  // render() gives it the canvas's aspect
+    if (this.room) this.mountRoom()
     if (old) VRMUtils.deepDispose(old.scene)
     return { name, expressions, meta: vrmTerms(vrm.meta as unknown as Record<string, unknown>) }
   }
@@ -209,7 +225,8 @@ export class VrmBody implements Body {
     c.updateProjectionMatrix()
   }
 
-  render(canvas: HTMLCanvasElement, { params: P, move, expr, pitch, yaw, gaze }: Pose, w: number, h: number, dt: number) {
+  render(canvas: HTMLCanvasElement, pose: Pose, w: number, h: number, dt: number) {
+    const { params: P, move, expr, pitch, yaw, gaze } = pose
     const THREE = this.THREE, vrm = this.vrm
     if (!vrm) return
     if (!this.renderer || this.canvas !== canvas) {
@@ -217,9 +234,14 @@ export class VrmBody implements Body {
       this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, premultipliedAlpha: true, preserveDrawingBuffer: true })
       this.renderer.setClearColor(0x000000, 0)
       this.canvas = canvas
+      this.roomReady = false
     }
-    if (canvas.width !== w || canvas.height !== h) this.renderer.setSize(w, h, false)
-    if (this.camera.aspect !== w / h || this.pitch !== pitch || this.yaw !== yaw) this.place(w / h, pitch, yaw)  // a new character's camera, on a canvas already this size too
+    const room = this.room
+    if (room && !this.roomReady) { room.prepare(this.renderer, this.scene); this.roomReady = true }
+    // in a room the drawing buffer may be a multiple of the canvas (supersample): the browser scales it down
+    const bw = room ? Math.round(w * room.cfg.supersample) : w, bh = room ? Math.round(h * room.cfg.supersample) : h
+    if (canvas.width !== bw || canvas.height !== bh) this.renderer.setSize(bw, bh, false)
+    if (!room && (this.camera.aspect !== w / h || this.pitch !== pitch || this.yaw !== yaw)) this.place(w / h, pitch, yaw)  // a new character's camera, on a canvas already this size too
     const b = this.bones, s = this.flip
     // the head turns most, the neck some (yaw: to the screen's right; pitch: up; roll: its top to the screen's right, as a
     // Player's does). The neck is optional in VRM: without one the head takes it all
@@ -237,9 +259,16 @@ export class VrmBody implements Body {
     // nudge). x/y move by that share of the visible width/height, and zoom
     // scales about the character's center (frame.y) — so zooming out keeps
     // the character in frame instead of dropping it out the bottom.
-    const visH = 2 * this.visHalfH, visW = visH * (w / h)
-    vrm.scene.position.set(move.x * visW, this.frame.y * (1 - move.s) + move.y * visH, 0)
-    vrm.scene.scale.setScalar(move.s)
+    if (room) {
+      // a room: the camera is the file's and the view moves it (orbit, dolly, lens shift); only the character's own
+      // motion (the pose's move without the view's part) moves the character
+      const V = pose.view ?? { x: 0, y: 0, zoom: 1 }
+      room.frame(this.camera, vrm.scene, w / h, { x: V.x, y: V.y, zoom: V.zoom, pitch, yaw, lens: this.roomLens }, { x: move.x - V.x, y: move.y - V.y, s: move.s / V.zoom })
+    } else {
+      const visH = 2 * this.visHalfH, visW = visH * (w / h)
+      vrm.scene.position.set(move.x * visW, this.frame.y * (1 - move.s) + move.y * visH, 0)
+      vrm.scene.scale.setScalar(move.s)
+    }
     const em = vrm.expressionManager
     if (em) {
       const set = (n: string, v: number) => { if (this.has.has(n)) em.setValue(n, Math.max(0, Math.min(1, v))) }
@@ -269,7 +298,65 @@ export class VrmBody implements Body {
 
   head() { return { ...this.headAt, rx: 0.14, ry: 0.1 } }
 
+  /** Puts a 3D room (a GLB) behind the character, in the same scene, lit and shadowed by its own lights. The camera in the
+   *  file is the view's origin: with the view at its defaults the picture is that camera's; yaw / pitch orbit it around the
+   *  character, zoom dollies toward the character, x / y shift the lens (see room.ts). Call before or after load(); the
+   *  room stays across loads. The file is read as it is: only its in-memory copy is adjusted (light intensities, shadows,
+   *  sky), and the character is the one that is scaled (config.unitsPerMeter) and placed. `url` is fetched here;
+   *  `config` is the `<room>.bg.json` (see RoomConfig) */
+  async setRoom(options: { url: string; config?: unknown; name?: string }): Promise<RoomInfo> {
+    const [THREE, { GLTFLoader }] = await Promise.all([import('three'), import('three/examples/jsm/loaders/GLTFLoader.js')]).catch((e) => {
+      throw new LivLivError('unreachable', `LivLiv: could not load three, which a room needs (${(e as Error).message})`)
+    })
+    this.THREE = THREE
+    const loader = new GLTFLoader()
+    this.options.configureLoader?.(loader)
+    const name = options.name ?? options.url.split('/').pop() ?? 'room'
+    let gltf
+    try {
+      gltf = await loader.loadAsync(options.url)
+    } catch (e) {
+      throw new LivLivError('not-a-model', `LivLiv: ${name} is not a room this player can read (${(e as Error).message})`, { cause: e })
+    }
+    const room = new Room(THREE, gltf, resolveRoomConfig(options.config), name)
+    this.room?.dispose()
+    this.room = room
+    this.roomReady = false
+    if (this.renderer) { this.renderer.dispose(); this.renderer = null }  // shadows and tone mapping are set when a renderer is made
+    if (this.vrm) this.mountRoom()
+    return room.info
+  }
+
+  /** a longer lens for the room's camera (1: the file's field of view; 2: half of it, as if zoomed in without moving). It is not part of
+   *  the player's view (x, y, zoom, pitch, yaw), so the page sets it itself, as the view changes */
+  setRoomLens(lens: number) { this.roomLens = Number.isFinite(lens) ? Math.max(0.1, lens) : 1 }
+
+  /** the room's configuration as resolved (defaults laid under the file's), or null with no room */
+  roomConfig(): RoomConfig | null { return this.room?.cfg ?? null }
+
+  /** the room's own report of itself: its camera, light scale, floor, where the character stands */
+  roomInfo(): RoomInfo | null { return this.room?.info ?? null }
+
+  /** the character's own two lights (0..): in a room these start at the room config's `character` values */
+  setCharacterLights(l: { ambient?: number; directional?: number }) {
+    if (!this.ownLights) return
+    if (l.ambient !== undefined) this.ownLights.amb.intensity = l.ambient
+    if (l.directional !== undefined) this.ownLights.dir.intensity = l.directional
+  }
+
+  /** the room and the character together in the scene made by load() */
+  private mountRoom() {
+    const room = this.room, vrm = this.vrm
+    if (!room || !vrm) return
+    room.mount(this.scene, vrm.scene, this.gauge)
+    room.characterShadows(vrm.scene)
+    room.characterLook(vrm.scene)
+    this.setCharacterLights({ ambient: room.cfg.character.ambient, directional: room.cfg.character.directional })
+    this.camera.fov = room.info.camera.yfovDeg
+  }
+
   dispose() {
+    this.room?.dispose(); this.room = null
     this.renderer?.dispose(); this.renderer = null; this.canvas = null
     const vrm = this.vrm
     this.vrm = null

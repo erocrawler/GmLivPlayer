@@ -18,7 +18,7 @@ Offline, frame-stepped video renderer built on this player: a small Node HTTP se
     RENDER_ROOT/player/Core/            purismcore.js (Live2D Core, MIT)
     RENDER_ROOT/player/Framework/       Cubism Web Framework shaders
     RENDER_ROOT/player/Resources/<model>/   Live2D models, PRE-PLACED on the host (model3.json + moc3 + textures + <model>.config.json) — never in git, never uploaded via the API
-    RENDER_ROOT/assets/{vrm,audio,bg}/   uploaded via PUT /assets/<kind>/<name>
+    RENDER_ROOT/assets/{vrm,audio,bg,anim,bg3d}/   uploaded via PUT /assets/<kind>/<name>
     RENDER_ROOT/jobs/           outputs
 
 `dist-multi` is the library build: `npx vite build --outDir dist-multi`. Node dependencies of the service: `playwright-core`.
@@ -27,8 +27,8 @@ mouth envelope is the player's own `envelope()` ported to node, so lipsync match
 
 ## API (short)
 
-`POST /jobs` with `vrm` XOR `character`, `audio`, `bg`/`bgColor`, `width,height,fps`, `amb,dir,gain,pre,post,duration,idle`,
-`view {x,y,zoom,pitch,yaw,gaze}`, `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `animations [{t,file}]` (VRM only, see below),
+`POST /jobs` with `vrm` XOR `character`, `audio`, `bg`/`bgColor` (or `bg3d`, VRM only, see below), `width,height,fps`, `amb,dir,gain,pre,post,duration,idle`,
+`view {x,y,zoom,pitch,yaw,gaze}` (`lens` too, bg3d only), `timeline [{t,e:{expr:weight}}]`, `actions [{t,name}]`, `animations [{t,file}]` (VRM only, see below),
 `credit`; `GET /jobs/:id`, `/jobs/:id/video.mp4`, `/info`.
 `view`: x/y are shares of the visible frame (y up), where 1 is the full frame — so 0.1 is a 10% nudge and 1 puts the
 character's center at the edge; zoom scales about the character's center (1 is the default head-to-hips framing,
@@ -49,6 +49,81 @@ portrait but 0.3 in landscape, or the feet get cut). Use the twin that matches t
 before the first entry the base `view` applies.
 `/info` also lists model capabilities under `live2dModels`, `vrmModels` and `livlivModels` (see below), so a client can discover
 motion/expression/outfit aliases instead of guessing them. Guards: min free VRAM / disk / shm, MAX_PIXELS, MAX_FRAMES.
+
+## 3D room background (`bg3d`)
+
+A VRM job can stand in a 3D room: `bg3d: "<name>.glb"` draws that GLB and the VRM in one three.js scene (the room's
+lights light and shadow the character). Only `vrm` jobs: `character` / `live2d` with `bg3d` are a 400. `bg3d` cannot be
+combined with `bg` / `bgColor` (400): the room supplies the whole picture. In a room `view` is a numeric object or the
+name of one of THAT room's views (below); the plain presets (`full`, `half`, ...) are tuned for the plain head-to-hips
+framing and are not used there (in a room `zoom` is a dolly).
+
+- Upload: `PUT /assets/bg3d/<name>.glb` (60 MB max; checked: a GLB with a perspective camera) and, beside it,
+  `PUT /assets/bg3d/<name>.bg.json` (the room's configuration, checked strictly — unknown keys, wrong types and
+  out-of-range numbers are a 400, keys starting with `_` are comments). `/info` lists every room under `bg3d`: the
+  configuration as read, `views` (the names of its camera views, read-only), and what the GLB itself declares (generator,
+  camera yfov/aspect, lights).
+- The GLB is never modified: no geometry, material, texture or node change. The page adjusts its in-memory copy (light
+  intensities, shadow switches, sky) and scales the *character*, never the room.
+- **Camera**: the camera in the file (the first one, or `camera.name`) is the origin of every view parameter. All zero:
+  the picture is that camera's own. `yaw` / `pitch` (degrees) orbit the camera around the character's stand point (yaw
+  positive: toward the camera's right = the character's left, same as the plain VRM orbit; pitch positive: down,
+  looking up at the character); `zoom` dollies along the line to the character (1 the file camera's own distance, 2 half
+  of it, 0.5 twice); `x` / `y` are a lens shift: the whole picture slides by that share of the visible frame (y up) and
+  the camera does not move. The character's own idle sway and `hop` move the character in the world. The field of
+  view is the file's vertical one, but on a canvas narrower than the file's aspect the file's *horizontal* one is kept
+  (`camera.fovMode`: `auto` | `vertical` | `horizontal`), or a portrait video would see a thin slit of the room. With
+  `camera.keepInside` (default on) the orbit stops at the room's floor and ceiling (a pitch that would put the camera
+  under the floor is cut short; still aimed at the character).
+- **Views (camera presets)**: a room names its own framings in `<name>.bg.json`, as data (the service has none built in):
+
+  ```json
+  "views": {
+    "wide": { "zoom": 1 },
+    "full": { "y": 0.2, "zoom": 2.5 },
+    "face": { "y": 0.03, "zoom": 3.2, "lens": 3 }
+  }
+  ```
+
+  Each entry is a view, every field optional (defaults `x 0, y 0, zoom 1, pitch 0, yaw 0, gaze 1, lens 1`), in the ranges a
+  job's own `view` has: `x`, `y` ∈ [-2, 2], `zoom` ∈ [0.2, 5], `pitch` ∈ [-60, 60], `yaw` ∈ [-180, 180], `gaze` ∈ [0, 1],
+  `lens` ∈ [1, 4]. A name is lowercase letters, digits, `-` or `_` (start with a letter, up to 24 characters; at most 32
+  views); an unknown key in an entry or a number out of range is a 400 at upload. A job then says `"view": "full"`, and
+  `viewTimeline` entries may say `"view": "face"` as well; the numeric object stays valid. A name the room does not have is a
+  400 that lists the ones it has. The framing depends on the room and on how the character stands (size, `stand.*`), so the
+  numbers are measured per room; `/info` → `bg3d.<room>.views` lists the names and `config.views` the numbers.
+  `lens` is a longer lens: it narrows the field of view (2 = half, by tangent) without moving the camera. `zoom` is
+  capped at 5, and in a portrait frame the character fills it long before that (on the default stand a waist-up shot
+  needs about 5× the default picture's magnification, a face about 10×), so close-ups combine the two; `lens` is for bg3d jobs only (a plain job with
+  `lens` ≠ 1 is a 400).
+- **Character**: stands on the floor in front of the camera facing it, `stand.characterHeightM` tall (default 1.35 m,
+  whatever size its VRM file is in; null = the file's own units are metres) and scaled by `unitsPerMeter` (the room's
+  size in metres). By default it is put at the nearest spot along the camera's heading at which the whole body is in
+  the file camera's picture (`stand.frameMargin` of the frame height below the feet); `stand.distanceM` and
+  `stand.lateralM` (metres, + = camera right) move it; `stand.depthM` (default 1.5) puts it that many metres *deeper* than
+  that spot (nearer the desks at the back; negative: nearer the camera), stepping away from the camera a tenth of a metre
+  at a time and stopping at the last spot that still has the same floor under it (within 15 cm of the first spot's: the
+  room's open edge, a sill, a slope end it) and nothing (wall, desk) within 0.3 m of the body. The floor is found with a ray down from the camera's height
+  (the widest upward-facing surface; meshes larger than `excludeMeshLargerThan` are ignored), or `floorY`.
+- **How bright the character is** (`character.brightness`, default 0.3; `character.skyFill`, default 1): the toon (MToon)
+  shader does not weigh a light by the cosine of its angle (its toon step replaces it), so under the room's sun a white
+  costume gets the full `I/π` where the room's PBR surfaces get `I·cosθ/π` (sun elevation ≈ 22°: the floor gets 0.37 of it): ~2.5×
+  brighter than a white thing in the room, blown out by the tone mapping and cream from the sun's warm colour. `brightness`
+  multiplies the toon materials' lit / shade / matcap / rim colours (1 = as the model's file says; 0.3 puts a white skirt at the
+  luma of the room's white lockers, ≈ 205/255). MToon also ignores `scene.environment` (three.js only hands it to its own
+  standard materials), so the character has no sky light, which is what keeps the room's whites white; `skyFill` adds the
+  sky (`sky.envTop` above / `sky.envBottom` below × `sky.envIntensity`, hemisphere-light maths) as an ambient term in the
+  character's shader only, × this (1 = the room's full sky, a blue-white costume; about 0.35 is neutral; 0 = none). Neither touches the room, and
+  `sky.envIntensity`, `toneMapping.exposure` and `character.ambient` were measured not to be the cause. Tuned for the Arona
+  room's sun: set both per room.
+- **Light**: `lights.intensityScale` `"auto"` divides by 683 when the file says Blender and a light is brighter than
+  100 (the glTF exporter multiplied watts by 683); the character's own two lights (`character.ambient` /
+  `character.directional`, default 0) are used only on top of the room's; a job's `amb` / `dir` set them when given
+  (and never touch the room's lights). Tone mapping, sky colour + gradient environment light, shadow maps (`mapSize`,
+  `bias`, `normalBias`, `radius`; three.js r186 has no soft PCF, `PCFSoft` is PCF) and `supersample` (drawing buffer =
+  canvas × n; default 1) are all in `<name>.bg.json`; see `src/room.ts` (`RoomConfig`) for every field and its meaning.
+- **Credit**: `credit` in `<name>.bg.json` is fixed server-side and appended to the video's credit line (after the
+  model's own credit, `|`-separated); the request cannot override or disable it.
 
 ## Live2D jobs (third format, alongside VRM and LivLiv)
 
