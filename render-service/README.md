@@ -50,6 +50,15 @@ before the first entry the base `view` applies.
 `/info` also lists model capabilities under `live2dModels`, `vrmModels` and `livlivModels` (see below), so a client can discover
 motion/expression/outfit aliases instead of guessing them. Guards: min free VRAM / disk / shm, MAX_PIXELS, MAX_FRAMES.
 
+## Post-processing filter (`filter`)
+
+An optional, VRM-only look: `filter: "blue-night"` or `{preset, bloom, dof, grade, outline, bgBlur, sparkle}`. Each
+number is a 0..2 multiplier of the preset (1 = preset, 0 = that effect off); unknown keys, non-vrm jobs and unknown
+presets are a 400. Absent / null / false = the unchanged pipeline: `render.html` only fetches `fx.js` when the service
+passes `?fx=`. `/info` lists the available presets under `filters`, and a finished job carries `fxInfo`. The filter
+costs roughly 60 MiB of extra VRAM and little time at 768x768 (measured on an RTX 3090 shared with other services), so
+the free-VRAM guard still applies.
+
 ## 3D room background (`bg3d`)
 
 A VRM job can stand in a 3D room: `bg3d: "<name>.glb"` draws that GLB and the VRM in one three.js scene (the room's

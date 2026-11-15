@@ -222,8 +222,17 @@ function validate(b){
   // otherwise the service's plain presets
   let roomCfg=null; // read once here, because view and viewTimeline are resolved while the job is built; the checks of bg3d itself follow below
   if(b.bg3d&&typeof b.bg3d==='string'&&safeName(b.bg3d)&&/\.glb$/i.test(b.bg3d)&&fs.existsSync(bg3dGlb(b.bg3d))) roomCfg=readBg3dConfig(b.bg3d)||{};
+  // Optional post-processing filter (VRM only). "blue-night" or {preset, bloom, dof, grade, outline, bgBlur, sparkle}: each strength is a
+  // multiplier of the preset (1 = preset, 0 = that effect off). Absent/null/false = the old pipeline, untouched.
+  const FILTERS=['blue-night'], FILTER_KEYS=['preset','bloom','dof','grade','outline','bgBlur','sparkle'];
+  const parseFilter=f=>{ if(f===undefined||f===null||f===false) return null; const o=typeof f==='string'?{preset:f}:f;
+    if(!o||typeof o!=='object'||Array.isArray(o)) throw new Error('filter must be a preset name or an object');
+    for(const k of Object.keys(o)) if(!FILTER_KEYS.includes(k)) throw new Error(`unknown filter key "${k}" (have: ${FILTER_KEYS.join(', ')})`);
+    const preset=o.preset===undefined?'blue-night':o.preset; if(!FILTERS.includes(preset)) throw new Error(`unknown filter preset "${preset}" (have: ${FILTERS.join(', ')})`);
+    const r={preset}; for(const k of FILTER_KEYS.slice(1)) if(o[k]!==undefined) r[k]=num(o[k],1,0,2,`filter.${k}`); return r };
   const presetView=name=>{ if(b.bg3d){ if(!roomCfg) throw new Error('unknown bg3d asset (a .glb under assets/bg3d, see /info bg3d)'); return roomView(name,roomCfg.views,b.bg3d) } const v=Object.hasOwn(VIEWS,name)?VIEWS[name]:undefined; if(!v) throw new Error(`unknown view "${name}" (have: ${Object.keys(VIEWS).join(', ')})`); return v };
   const j={ vrm:b.vrm?String(b.vrm):null, character:b.character?String(b.character):null, live2d:b.live2d?String(b.live2d):null, motion:b.motion?String(b.motion):null, credit:b.credit===undefined?undefined:b.credit, audio:b.audio?String(b.audio):null, bg:b.bg?String(b.bg):null, bgColor:b.bgColor?String(b.bgColor):null, bg3d:b.bg3d?String(b.bg3d):null, ambSet:b.amb!==undefined, dirSet:b.dir!==undefined,
+    filter:parseFilter(b.filter),
     width:Math.round(num(b.width,720,64,2048,'width')), height:Math.round(num(b.height,1280,64,2048,'height')), fps:num(b.fps,24,1,30,'fps'),
     amb:num(b.amb,0,0,3,'amb'), dir:b.dir===undefined?null:num(b.dir,Math.PI,0,10,'dir'), gain:num(b.gain,0.65,0,1,'gain'),
     pre:num(b.pre,0.6,0,10,'pre'), post:num(b.post,1,0,10,'post'), duration:num(b.duration,0,0,60,'duration'), idle:b.idle!==false,
@@ -241,6 +250,7 @@ function validate(b){
     // playing the idle resumes. Expressions (timeline) and lip-sync stack
     // with clips — they drive the face, clips drive the body.
     animations:Array.isArray(b.animations)?b.animations.slice(0,200).map(a=>{ if(typeof a.file!=='string'||!safeName(a.file)||!/\.vrma$/i.test(a.file)) throw new Error('bad animation file'); return {file:a.file,t:num(a.t,0,-10,120,'animations.t')} }).sort((a,c)=>a.t-c.t):[] };
+  if(j.filter&&!j.vrm) throw new Error('filter is for vrm jobs only (character and live2d pages have their own renderers)');
   if(j.width*j.height>MAX_PIXELS) throw new Error(`too many pixels (max ${MAX_PIXELS})`);
   if((!!j.vrm)+(!!j.character)+(!!j.live2d)!==1) throw new Error('give exactly one of vrm, character or live2d');
   if(!j.bg3d&&(j.view.lens!==1||j.viewTimeline.some(k=>k.lens!==1))) throw new Error('view.lens (a longer camera lens) is for bg3d rooms only');
@@ -298,6 +308,7 @@ async function runJob(job){
   if(p.dir!==null) q.set('dir',String(p.dir)); if(p.bg) q.set('bg',`/assets/bg/${p.bg}`); else if(p.bgColor) q.set('bgc',p.bgColor);
   if(p.bg3d){ q.set('bg3d',`/assets/bg3d/${p.bg3d.file}`); q.set('bg3dcfg',JSON.stringify(Object.fromEntries(Object.entries(p.bg3d.config).filter(([k])=>k!=='views')))); // views were resolved into the job's numbers here; // amb/dir override the room's character lights only when the request gave them
     if(p.ambSet) q.set('camb',String(p.amb)); if(p.dirSet&&p.dir!==null) q.set('cdir',String(p.dir)) }
+  if(p.filter) q.set('fx',JSON.stringify(p.filter));
   if(p.animations.length){ q.set('anims',JSON.stringify(p.animations)); q.set('pre',String(p.pre)) }
   if(p.viewTimeline.length) q.set('viewtl',JSON.stringify(p.viewTimeline));
   const browser=await chromium.launch({args:['--use-gl=angle','--use-angle=gl-egl','--enable-gpu','--ignore-gpu-blocklist','--no-sandbox','--disable-gpu-sandbox']});
@@ -307,6 +318,7 @@ async function runJob(job){
     await page.waitForFunction(()=>window.ready||window.err,null,{timeout:180000});
     const err=await page.evaluate(()=>window.err); if(err) throw new Error('page: '+err);
     job.renderer=await page.evaluate(()=>window.renderer());
+    if(p.filter) job.fxInfo=await page.evaluate(()=>window.fxInfo||null);
     if(p.bg3d){ job.room=await page.evaluate(()=>window.roomInfo()); log('job',job.id,'room',JSON.stringify({file:p.bg3d.file,stand:job.room?.stand,floorY:job.room?.floorY,floorFrom:job.room?.floorFrom,lightScale:job.room?.lightScale})) } const ids=await page.evaluate(()=>window.exprIds());
     for(const k of p.timeline) for(const id of Object.keys(k.e)) if(!ids.includes(id)) throw new Error(`unknown expression "${id}" (have: ${ids.join(', ')})`);
     if(isL2d){
@@ -350,14 +362,14 @@ async function pump(){
   running=false;
 }
 // ---- public API ----
-const pub=j=>({id:j.id,state:j.state,character:j.params?.character,bg3d:j.params?.bg3d?.file,live2d:j.params?.live2d,credit:j.params?.credit||undefined,progress:j.progress??0,frames:j.frames,videoSec:j.videoSec,renderSec:j.renderSec,renderer:j.renderer,bytes:j.bytes,error:j.error});
+const pub=j=>({id:j.id,state:j.state,character:j.params?.character,bg3d:j.params?.bg3d?.file,live2d:j.params?.live2d,filter:j.params?.filter||undefined,fxInfo:j.fxInfo,credit:j.params?.credit||undefined,progress:j.progress??0,frames:j.frames,videoSec:j.videoSec,renderSec:j.renderSec,renderer:j.renderer,bytes:j.bytes,error:j.error});
 http.createServer(async(req,res)=>{
   try{
     const u=new URL(req.url,'http://x'), parts=u.pathname.split('/').filter(Boolean);
     if(req.method==='GET'&&u.pathname==='/health') return json(res,200,{ok:true});
     if(!okKey(req.headers['x-render-key'])) return json(res,401,{error:'unauthorized'});
     if(req.method==='GET'&&u.pathname==='/info'){ const l2=live2dModels(); const vr=vrmModels(), lv=livlivCharacters();
-      return json(res,200,{freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,views:VIEWS,assets:Object.fromEntries(['vrm','audio','bg','anim','bg3d'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),bg3d:Object.fromEntries(bg3dRooms().map(f=>[f,bg3dCaps(f)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
+      return json(res,200,{filters:['blue-night'],freeVramMiB:freeVramMiB(),freeDiskMB:freeDiskMB(),freeShmMB:freeShmMB(),queued:queue.length,running,views:VIEWS,assets:Object.fromEntries(['vrm','audio','bg','anim','bg3d'].map(k=>[k,fs.readdirSync(`${ASSETS}/${k}`)])),animations:Object.fromEntries(animFiles().map(f=>[f,{duration:vrmaDuration(`${ASSETS}/anim/${f}`)}]).filter(([,v])=>v.duration!==null)),live2d:l2,live2dModels:Object.fromEntries(l2.map(m=>[m,live2dCaps(m)]).filter(([,c])=>c!==null)),bg3d:Object.fromEntries(bg3dRooms().map(f=>[f,bg3dCaps(f)]).filter(([,c])=>c!==null)),vrmModels:Object.fromEntries(vr.map(f=>[f,vrmCaps(`${ASSETS}/vrm/${f}`)]).filter(([,c])=>c!==null)),livlivModels:Object.fromEntries(lv.map(id=>[id,livlivCaps(id)]).filter(([,c])=>c!==null))}); }
     if(req.method==='PUT'&&parts[0]==='assets'&&parts.length===3){
       const [,kind,name]=parts; if(!EXT[kind]||!safeName(name)||!EXT[kind].includes(path.extname(name).toLowerCase())) return json(res,400,{error:'bad kind/name/extension'});
       if(freeDiskMB()<MIN_DISK_MB) return json(res,507,{error:'disk low'});

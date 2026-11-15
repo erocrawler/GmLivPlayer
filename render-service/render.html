@@ -14,6 +14,8 @@ if(q.get('bg')) document.body.style.backgroundImage=`url(${q.get('bg')})`; else 
 const body=new VrmBody(); window.body=body;
 const player=new BodyPlayer(canvas,body,{autoplay:false,idle:q.get('idle')!=='0'});
 window.player=player; window.ready=false; window.err=null;
+// optional post-processing filter (job `filter`): fx.js is only fetched when the service passes ?fx=; otherwise nothing changes
+const fxq=q.get('fx'); if(fxq){ try{ const {installFx}=await import('/fx.js'); window.fxInfo=installFx(body,W,H,JSON.parse(fxq),!!q.get('bg3d')) }catch(e){ window.err='fx: '+String(e.message||e) } }
 // .vrma clips on a timeline (job `animations`): [{file, t}] — t seconds from
 // audio start, the same base as the expression timeline and the one-shot
 // actions. The latest clip whose t has passed and which has not finished
